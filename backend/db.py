@@ -2,7 +2,7 @@ import sqlite3
 from flask import g
 import os
 
-DATABASE = os.getenv('DATABASE_PATH', '/app/data/messenger.db')
+DATABASE = os.getenv('DATABASE_PATH', os.path.join(os.path.dirname(__file__), 'data', 'messenger.db'))
 
 def get_db():
     if 'db' not in g:

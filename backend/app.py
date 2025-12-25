@@ -4,11 +4,15 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 import os
 
 
+
+from flask import send_from_directory
 from auth import auth_bp
 from messages import messages_bp
 from db import get_db, close_db, init_db
 
 
+
+FRONTEND_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'frontend'))
 app = Flask(__name__)
 
 
@@ -26,6 +30,19 @@ app.config['DATABASE'] = os.getenv('DATABASE_PATH', '/app/data/messenger.db')
 # Register blueprints
 app.register_blueprint(auth_bp)
 app.register_blueprint(messages_bp)
+
+# Serve static HTML pages
+@app.route('/')
+def serve_index():
+    return send_from_directory(FRONTEND_DIR, 'index.html')
+
+@app.route('/login.html')
+def serve_login():
+    return send_from_directory(FRONTEND_DIR, 'login.html')
+
+@app.route('/register.html')
+def serve_register():
+    return send_from_directory(FRONTEND_DIR, 'register.html')
 
 # Database connection hooks
 @app.before_request

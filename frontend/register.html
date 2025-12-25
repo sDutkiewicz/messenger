@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rejestracja - Messenger</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div id="app">
+        <h2>Rejestracja</h2>
+        <form id="registerForm">
+            <input type="text" name="username" placeholder="Nazwa użytkownika" required minlength="3" maxlength="32"><br>
+            <input type="email" name="email" placeholder="Email" required><br>
+            <input type="password" name="password" placeholder="Hasło" required minlength="12"><br>
+            <button type="submit">Zarejestruj się</button>
+        </form>
+        <div id="registerMsg"></div>
+        <a href="login.html">Masz już konto? Zaloguj się</a>
+    </div>
+    <script>
+    document.getElementById('registerForm').onsubmit = async function(e) {
+        e.preventDefault();
+        const form = e.target;
+        const data = {
+            username: form.username.value,
+            email: form.email.value,
+            password: form.password.value
+        };
+        const res = await fetch('/api/register', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(data)
+        });
+        const msg = document.getElementById('registerMsg');
+        if (res.ok) {
+            msg.textContent = 'Rejestracja udana! Możesz się zalogować.';
+            msg.style.color = 'green';
+        } else {
+            const err = await res.json();
+            msg.textContent = err.error || 'Błąd rejestracji';
+            msg.style.color = 'red';
+        }
+    };
+    </script>
+</body>
+</html>
