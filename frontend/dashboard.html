@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Messenger - Dashboard</title>
+    <link rel="stylesheet" href="styles.css">
+    <style>
+        #usersList { max-width: 200px; float: left; margin-right: 30px; }
+        #conversation { max-width: 500px; float: left; }
+        #usersList ul { list-style: none; padding: 0; }
+        #usersList li { padding: 10px; border-bottom: 1px solid #eee; cursor: pointer; }
+        #usersList li.selected { background: #e0e7ff; font-weight: bold; }
+        #messages { min-height: 200px; border: 1px solid #eee; padding: 10px; background: #fafbff; margin-bottom: 10px; }
+        #sendForm { display: flex; gap: 10px; }
+        #sendForm input, #sendForm button { flex: 1; }
+    </style>
+</head>
+<body>
+    <div id="app">
+        <h2>Wiadomości</h2>
+        <div id="usersList">
+            <h3>Użytkownicy</h3>
+            <ul id="users"></ul>
+        </div>
+        <div id="conversation">
+            <h3 id="convTitle">Wybierz użytkownika</h3>
+            <div id="messages"></div>
+            <form id="sendForm" style="display:none;">
+                <input type="text" id="msgInput" placeholder="Napisz wiadomość..." required>
+                <button type="submit">Wyślij</button>
+            </form>
+        </div>
+        <div style="clear:both;"></div>
+    </div>
+    <script src="dashboard.js"></script>
+    <script>
+    let selectedUser = null;
+    async function fetchUsers() {
+        const res = await fetch('/api/users');
+        const users = await res.json();
+        const ul = document.getElementById('users');
+        ul.innerHTML = '';
+        users.forEach(u => {
+            const li = document.createElement('li');
+            li.textContent = u.username;
+            li.onclick = () => selectUser(u);
+            if (selectedUser && selectedUser.id === u.id) li.classList.add('selected');
+            ul.appendChild(li);
+        });
+    }
+    async function fetchMessages(userId) {
+        const res = await fetch(`/api/messages/conversation/${userId}`);
+        const data = await res.json();
+        const messagesDiv = document.getElementById('messages');
+        messagesDiv.innerHTML = '';
+        data.messages.forEach(m => {
+            const div = document.createElement('div');
+            div.textContent = `${m.sender}: ${m.content}`;
+            messagesDiv.appendChild(div);
+        });
+    }
+    function selectUser(user) {
+        selectedUser = user;
+        document.getElementById('convTitle').textContent = 'Rozmowa z: ' + user.username;
+        document.getElementById('sendForm').style.display = '';
+        fetchMessages(user.id);
+        fetchUsers();
+    }
+    document.getElementById('sendForm').onsubmit = async function(e) {
+        e.preventDefault();
+        if (!selectedUser) return;
+        const msg = document.getElementById('msgInput').value;
+        await fetch('/api/messages/send', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ recipient_id: selectedUser.id, content: msg })
+        });
+        document.getElementById('msgInput').value = '';
+        fetchMessages(selectedUser.id);
+    };
+    fetchUsers();
+    </script>
+</body>
+</html>

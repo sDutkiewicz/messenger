@@ -17,7 +17,11 @@ def close_db(e=None):
 
 
 def init_db():
-    """Initialize the database and create tables if they do not exist."""
+    """Initialize the database and create tables if they do not exist. Insert example users if empty."""
+    # ensure directory exists
+    db_dir = os.path.dirname(DATABASE)
+    if not os.path.exists(db_dir):
+        os.makedirs(db_dir, exist_ok=True)
     db = sqlite3.connect(DATABASE)
     cursor = db.cursor()
     cursor.executescript('''
@@ -64,3 +68,26 @@ def init_db():
     ''')
     db.commit()
     db.close()
+    add_example_users()
+
+# Add example users (alice, bob, carol) if they do not exist
+def add_example_users():
+    db = sqlite3.connect(DATABASE)
+    cursor = db.cursor()
+    from argon2 import PasswordHasher
+    ph = PasswordHasher()
+    users = [
+        ('alice', 'alice@example.com', ph.hash('TestHaslo123'), os.urandom(16), 'PUBKEY', 'PRIVKEY', 'TOTP'),
+        ('bob', 'bob@example.com', ph.hash('TestHaslo123'), os.urandom(16), 'PUBKEY', 'PRIVKEY', 'TOTP'),
+        ('carol', 'carol@example.com', ph.hash('TestHaslo123'), os.urandom(16), 'PUBKEY', 'PRIVKEY', 'TOTP'),
+    ]
+    for u in users:
+        cursor.execute('SELECT 1 FROM users WHERE username = ?', (u[0],))
+        if cursor.fetchone() is None:
+            cursor.execute(
+                'INSERT INTO users (username, email, password_hash, salt, public_key, private_key_encrypted, totp_secret) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                u
+            )
+    db.commit()
+    db.close()
+    

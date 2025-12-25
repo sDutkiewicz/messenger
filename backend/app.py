@@ -40,9 +40,14 @@ def serve_index():
 def serve_login():
     return send_from_directory(FRONTEND_DIR, 'login.html')
 
+
 @app.route('/register.html')
 def serve_register():
     return send_from_directory(FRONTEND_DIR, 'register.html')
+
+@app.route('/dashboard.html')
+def serve_dashboard():
+    return send_from_directory(FRONTEND_DIR, 'dashboard.html')
 
 # Database connection hooks
 @app.before_request

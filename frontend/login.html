@@ -34,7 +34,8 @@
         if (res.ok) {
             msg.textContent = 'Zalogowano!';
             msg.style.color = 'green';
-            // TODO: redirect to dashboard or 2FA
+            localStorage.setItem('loggedIn', '1');
+            setTimeout(() => { window.location.href = 'dashboard.html'; }, 500);
         } else {
             const err = await res.json();
             msg.textContent = err.error || 'Błąd logowania';
