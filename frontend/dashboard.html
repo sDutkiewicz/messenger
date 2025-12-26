@@ -68,7 +68,12 @@
         data.messages.forEach(m => {
             const div = document.createElement('div');
             const who = (m.sender_id === myId) ? 'Ty' : m.sender;
-            div.textContent = `${who}: ${m.content}`;
+            let text = `${who}: ${m.content}`;
+            if (m.sender_id === myId) {
+                // show read receipt for messages I sent
+                text += m.is_read ? ' ✓ Odczytane' : ' ☐ Wysłane';
+            }
+            div.textContent = text;
             messagesDiv.appendChild(div);
         });
         messagesDiv.scrollTop = messagesDiv.scrollHeight;

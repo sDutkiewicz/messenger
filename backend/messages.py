@@ -34,8 +34,17 @@ def get_me():
 def get_conversation(user_id):
     db = get_db()
     my_id = get_current_user_id()
+    # mark messages sent to me by this user as read
+    try:
+        db.execute(
+            'UPDATE messages SET is_read = 1 WHERE sender_id = ? AND recipient_id = ? AND is_read = 0',
+            (user_id, my_id)
+        )
+        db.commit()
+    except Exception:
+        pass
     messages = db.execute('''
-        SELECT m.id, m.sender_id, m.recipient_id, m.encrypted_content as content, u.username as sender
+        SELECT m.id, m.sender_id, m.recipient_id, m.encrypted_content as content, m.is_read, u.username as sender
         FROM messages m
         JOIN users u ON m.sender_id = u.id
         WHERE (m.sender_id = ? AND m.recipient_id = ?)
@@ -43,7 +52,7 @@ def get_conversation(user_id):
         ORDER BY m.created_at ASC
     ''', (my_id, user_id, user_id, my_id)).fetchall()
     return jsonify({'messages': [
-        {'id': m['id'], 'sender': m['sender'], 'sender_id': m['sender_id'], 'content': m['content']} for m in messages
+        {'id': m['id'], 'sender': m['sender'], 'sender_id': m['sender_id'], 'content': m['content'], 'is_read': m['is_read']} for m in messages
     ]})
 
 @messages_bp.route('/api/messages/send', methods=['POST'])
