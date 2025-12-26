@@ -1,6 +1,9 @@
 from flask import Blueprint, request, jsonify
 from db import get_db
 from flask import session
+
+
+
 messages_bp = Blueprint('messages', __name__)
 
 
@@ -75,4 +78,21 @@ def send_message():
         return jsonify({'message': 'Wysłano.', 'id': cur.lastrowid}), 201
     except Exception as e:
         return jsonify({'error': 'Server error', 'details': str(e)}), 500
+
+
+@messages_bp.route('/api/messages/<int:msg_id>', methods=['DELETE'])
+def delete_message(msg_id):
+    """Delete a message if requester is sender or recipient."""
+    db = get_db()
+    my_id = get_current_user_id()
+    if my_id is None:
+        return jsonify({'error': 'Nieautoryzowany'}), 401
+    msg = db.execute('SELECT sender_id, recipient_id FROM messages WHERE id = ?', (msg_id,)).fetchone()
+    if not msg:
+        return jsonify({'error': 'Nie znaleziono wiadomości.'}), 404
+    if my_id != msg['sender_id'] and my_id != msg['recipient_id']:
+        return jsonify({'error': 'Brak uprawnień.'}), 403
+    db.execute('DELETE FROM messages WHERE id = ?', (msg_id,))
+    db.commit()
+    return '', 204
 

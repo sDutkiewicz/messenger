@@ -66,15 +66,37 @@
         const messagesDiv = document.getElementById('messages');
         messagesDiv.innerHTML = '';
         data.messages.forEach(m => {
-            const div = document.createElement('div');
+            const wrapper = document.createElement('div');
+            wrapper.className = 'message-item';
             const who = (m.sender_id === myId) ? 'Ty' : m.sender;
+            const textNode = document.createElement('span');
             let text = `${who}: ${m.content}`;
             if (m.sender_id === myId) {
-                // show read receipt for messages I sent
                 text += m.is_read ? ' ✓ Odczytane' : ' ☐ Wysłane';
             }
-            div.textContent = text;
-            messagesDiv.appendChild(div);
+            textNode.textContent = text;
+            wrapper.appendChild(textNode);
+
+            // Add delete button for sender or recipient
+            if (m.sender_id === myId || /* allow recipient to delete too */ false) {
+                const delBtn = document.createElement('button');
+                delBtn.textContent = 'Usuń';
+                delBtn.style.marginLeft = '10px';
+                delBtn.onclick = async (e) => {
+                    e.stopPropagation();
+                    if (!confirm('Na pewno usunąć wiadomość?')) return;
+                    const res = await fetch(`/api/messages/${m.id}`, { method: 'DELETE' });
+                    if (res.status === 204) {
+                        fetchMessages(selectedUser.id);
+                    } else {
+                        const err = await res.json();
+                        alert(err.error || 'Błąd usuwania');
+                    }
+                };
+                wrapper.appendChild(delBtn);
+            }
+
+            messagesDiv.appendChild(wrapper);
         });
         messagesDiv.scrollTop = messagesDiv.scrollHeight;
     }
