@@ -3,7 +3,7 @@ from db import get_db
 from flask import session
 messages_bp = Blueprint('messages', __name__)
 
-@messages_bp.route('/api/messages/send', methods=['POST'])
+
 def get_current_user_id():
     user_id = session.get('user_id')
     if user_id is None:
@@ -16,8 +16,19 @@ def list_users():
     db = get_db()
     my_id = get_current_user_id()
     users = db.execute('SELECT id, username FROM users WHERE id != ?', (my_id,)).fetchall()
-    # Show user id for clarity in dashboard
-    return jsonify([{'id': u['id'], 'username': f"{u['username']} (id={u['id']})"} for u in users])
+    return jsonify([{'id': u['id'], 'username': u['username']} for u in users])
+
+
+@messages_bp.route('/api/me', methods=['GET'])
+def get_me():
+    db = get_db()
+    my_id = get_current_user_id()
+    if my_id is None:
+        return jsonify({'id': None, 'username': None}), 200
+    user = db.execute('SELECT id, username FROM users WHERE id = ?', (my_id,)).fetchone()
+    if not user:
+        return jsonify({'id': None, 'username': None}), 200
+    return jsonify({'id': user['id'], 'username': user['username']})
 
 @messages_bp.route('/api/messages/conversation/<int:user_id>', methods=['GET'])
 def get_conversation(user_id):
@@ -32,22 +43,27 @@ def get_conversation(user_id):
         ORDER BY m.created_at ASC
     ''', (my_id, user_id, user_id, my_id)).fetchall()
     return jsonify({'messages': [
-        {'id': m['id'], 'sender': m['sender'], 'content': m['content']} for m in messages
+        {'id': m['id'], 'sender': m['sender'], 'sender_id': m['sender_id'], 'content': m['content']} for m in messages
     ]})
 
 @messages_bp.route('/api/messages/send', methods=['POST'])
 def send_message():
-    data = request.get_json()
-    recipient_id = data.get('recipient_id')
-    content = data.get('content', '').strip()
-    if not recipient_id or not content:
-        return jsonify({'error': 'Brak odbiorcy lub treści.'}), 400
-    db = get_db()
-    my_id = get_current_user_id()
-    db.execute(
-        'INSERT INTO messages (sender_id, recipient_id, encrypted_content, session_key_encrypted, signature) VALUES (?, ?, ?, ?, ?)',
-        (my_id, recipient_id, content, '', '')
-    )
-    db.commit()
-    return jsonify({'message': 'Wysłano.'}), 201
+    try:
+        data = request.get_json() or {}
+        recipient_id = data.get('recipient_id')
+        content = (data.get('content') or '').strip()
+        if not recipient_id or not content:
+            return jsonify({'error': 'Brak odbiorcy lub treści.'}), 400
+        db = get_db()
+        my_id = get_current_user_id()
+        if my_id is None:
+            return jsonify({'error': 'Nieautoryzowany'}), 401
+        cur = db.execute(
+            'INSERT INTO messages (sender_id, recipient_id, encrypted_content, session_key_encrypted, signature) VALUES (?, ?, ?, ?, ?)',
+            (my_id, recipient_id, content, '', '')
+        )
+        db.commit()
+        return jsonify({'message': 'Wysłano.', 'id': cur.lastrowid}), 201
+    except Exception as e:
+        return jsonify({'error': 'Server error', 'details': str(e)}), 500
 

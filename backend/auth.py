@@ -1,5 +1,5 @@
 
-from flask import Blueprint, request, jsonify, g
+from flask import Blueprint, request, jsonify, g, session
 from db import get_db
 from argon2 import PasswordHasher
 import os
@@ -44,11 +44,13 @@ def register():
         public_key = 'PUBLIC_KEY_PLACEHOLDER'
         private_key_encrypted = 'PRIVATE_KEY_PLACEHOLDER'
         totp_secret = 'TOTP_SECRET_PLACEHOLDER'
-        db.execute(
+        cur = db.execute(
             'INSERT INTO users (username, email, password_hash, salt, public_key, private_key_encrypted, totp_secret) VALUES (?, ?, ?, ?, ?, ?, ?)',
             (username, email, password_hash, salt, public_key, private_key_encrypted, totp_secret)
         )
         db.commit()
+        # set session to newly created user
+        session['user_id'] = cur.lastrowid
     except Exception as e:
         if 'UNIQUE constraint failed: users.username' in str(e):
             return jsonify({'error': 'Nazwa użytkownika już istnieje.'}), 409
@@ -74,8 +76,9 @@ def login():
         ph.verify(user['password_hash'], password)
     except Exception:
         return jsonify({'error': 'Nieprawidłowe dane logowania.'}), 401
-    # TODO: 2FA check, session management
-    return jsonify({'message': 'Zalogowano pomyślnie.'}), 200
+    # set session for logged in user
+    session['user_id'] = user['id']
+    return jsonify({'message': 'Zalogowano pomyślnie.', 'id': user['id']}), 200
 
 @auth_bp.route('/api/verify-2fa', methods=['POST'])
 def verify_2fa():
