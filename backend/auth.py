@@ -39,6 +39,15 @@ def register():
         return jsonify({'error': 'Hasło musi mieć min. 12 znaków, dużą i małą literę oraz cyfrę.'}), 400
 
     db = get_db()
+    # pre-check uniqueness to provide specific UX messages
+    try:
+        if db.execute('SELECT 1 FROM users WHERE username = ?', (username,)).fetchone():
+            return jsonify({'error': 'Nazwa użytkownika już istnieje.'}), 409
+        if db.execute('SELECT 1 FROM users WHERE email = ?', (email,)).fetchone():
+            return jsonify({'error': 'Email już istnieje.'}), 409
+    except Exception:
+        # if check fails, continue and rely on INSERT/IntegrityError handling
+        pass
     try:
         password_hash = ph.hash(password)
         # generate TOTP secret for user enrollment
