@@ -50,11 +50,18 @@
             msg.textContent = 'Rejestracja udana! Dokończ konfigurację 2FA.';
             msg.style.color = 'green';
             // show provisioning QR and secret
-            if (body.provisioning_uri || body.totp_secret) {
+            if (body.provisioning_qr || body.provisioning_uri || body.totp_secret) {
                 const twofa = document.getElementById('twofaSetup');
                 const qr = document.getElementById('provisionQr');
                 const secret = document.getElementById('totpSecret');
-                if (body.provisioning_uri) {
+                // prefer server-generated data URL, else server-saved path, else external chart
+                if (body.provisioning_qr) {
+                    qr.src = body.provisioning_qr;
+                    qr.style.display = 'block';
+                } else if (body.provisioning_qr_path) {
+                    qr.src = body.provisioning_qr_path;
+                    qr.style.display = 'block';
+                } else if (body.provisioning_uri) {
                     qr.src = 'https://chart.googleapis.com/chart?chs=200x200&cht=qr&chl=' + encodeURIComponent(body.provisioning_uri);
                     qr.style.display = 'block';
                 }

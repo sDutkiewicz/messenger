@@ -6,6 +6,10 @@ import os
 import re
 import time
 import pyotp
+import qrcode
+import io
+import base64
+import glob
 
 auth_bp = Blueprint('auth', __name__)
 ph = PasswordHasher()
@@ -66,8 +70,31 @@ def register():
         # build provisioning URI for authenticator apps
         try:
             provisioning_uri = pyotp.TOTP(totp_secret).provisioning_uri(name=email or username, issuer_name='Messenger')
+            # generate QR PNG as data URL so frontend doesn't rely on external chart API
+            try:
+                qr_img = qrcode.make(provisioning_uri)
+                # create data URL
+                buf = io.BytesIO()
+                qr_img.save(buf, format='PNG')
+                buf.seek(0)
+                qr_b64 = base64.b64encode(buf.read()).decode('ascii')
+                provisioning_qr = f'data:image/png;base64,{qr_b64}'
+                # also save a temporary file on disk and provide a static URL
+                try:
+                    qr_dir = os.path.join(os.path.dirname(__file__), 'static', 'qrs')
+                    os.makedirs(qr_dir, exist_ok=True)
+                    filename = f'{cur.lastrowid}_{int(time.time())}.png'
+                    filepath = os.path.join(qr_dir, filename)
+                    qr_img.save(filepath, format='PNG')
+                    provisioning_qr_path = f'/static/qrs/{filename}'
+                except Exception:
+                    provisioning_qr_path = None
+            except Exception:
+                provisioning_qr = None
+                provisioning_qr_path = None
         except Exception:
             provisioning_uri = None
+            provisioning_qr = None
     except Exception as e:
         # Do not reveal whether username or email already exists. Log a short warning.
         try:
@@ -77,7 +104,7 @@ def register():
         if 'UNIQUE constraint failed' in str(e):
             return jsonify({'error': 'Rejestracja nie powiodła się.'}), 409
         return jsonify({'error': 'Rejestracja nie powiodła się.'}), 500
-    return jsonify({'message': 'Rejestracja udana. Dokończ konfigurację 2FA.', 'provisioning_uri': provisioning_uri, 'totp_secret': totp_secret}), 201
+    return jsonify({'message': 'Rejestracja udana. Dokończ konfigurację 2FA.', 'provisioning_uri': provisioning_uri, 'provisioning_qr': provisioning_qr, 'provisioning_qr_path': provisioning_qr_path, 'totp_secret': totp_secret}), 201
 
 @auth_bp.route('/api/login', methods=['POST'])
 def login():
@@ -133,7 +160,11 @@ def login():
         return jsonify({'error': 'Nieprawidłowe dane logowania.'}), 401
 
     # if user has TOTP configured, require 2FA verification step
-    if user and user.get('totp_secret') and user.get('totp_secret') != 'TOTP_SECRET_PLACEHOLDER':
+    try:
+        user_totp = user['totp_secret'] if user else None
+    except Exception:
+        user_totp = None
+    if user and user_totp and user_totp != 'TOTP_SECRET_PLACEHOLDER':
         # set pre-auth session and ask client to verify 2FA
         session['pre_2fa_user_id'] = user['id']
         return jsonify({'message': 'Wymagana weryfikacja 2FA.', '2fa_required': True}), 200
@@ -161,7 +192,10 @@ def verify_2fa():
     if not user:
         return jsonify({'error': 'Weryfikacja 2FA nie powiodła się.'}), 401
 
-    totp_secret = user.get('totp_secret')
+    try:
+        totp_secret = user['totp_secret']
+    except Exception:
+        totp_secret = None
     # don't reveal whether 2FA is configured
     if not totp_secret or totp_secret == 'TOTP_SECRET_PLACEHOLDER':
         # record failed attempt
@@ -198,4 +232,16 @@ def verify_2fa():
         db.commit()
     except Exception:
         pass
+    # cleanup temporary QR files for this user (if any)
+    try:
+        qr_dir = os.path.join(os.path.dirname(__file__), 'static', 'qrs')
+        pattern = os.path.join(qr_dir, f"{user['id']}_*.png")
+        for p in glob.glob(pattern):
+            try:
+                os.remove(p)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
     return jsonify({'message': 'Weryfikacja 2FA zakończona pomyślnie.', 'id': user['id']}), 200
