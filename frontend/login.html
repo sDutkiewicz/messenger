@@ -15,6 +15,14 @@
             <button type="submit">Zaloguj się</button>
         </form>
         <div id="loginMsg"></div>
+        <div id="twofaSection" style="display:none; margin-top:10px;">
+            <h3>Weryfikacja 2FA</h3>
+            <form id="login2faForm">
+                <input type="text" name="code" placeholder="Kod 2FA" required pattern="\d{6}" inputmode="numeric"><br>
+                <button type="submit">Weryfikuj kod</button>
+            </form>
+            <div id="login2faMsg"></div>
+        </div>
         <a href="register.html">Nie masz konta? Zarejestruj się</a>
     </div>
     <script>
@@ -27,19 +35,49 @@
         };
         const res = await fetch('/api/login', {
             method: 'POST',
+            credentials: 'same-origin',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify(data)
         });
         const msg = document.getElementById('loginMsg');
-        if (res.ok) {
+        const body = await res.json().catch(() => ({}));
+        if (res.ok && body['2fa_required']) {
+            // show 2FA input
+            msg.textContent = 'Wymagana weryfikacja 2FA.';
+            msg.style.color = 'orange';
+            document.getElementById('twofaSection').style.display = 'block';
+        } else if (res.ok) {
             msg.textContent = 'Zalogowano!';
             msg.style.color = 'green';
             localStorage.setItem('loggedIn', '1');
             setTimeout(() => { window.location.href = 'dashboard.html'; }, 500);
         } else {
-            const err = await res.json();
+            const err = body;
             msg.textContent = err.error || 'Błąd logowania';
             msg.style.color = 'red';
+        }
+    };
+
+    // 2FA submission after login
+    document.getElementById('login2faForm').onsubmit = async function(e) {
+        e.preventDefault();
+        const code = e.target.code.value.trim();
+        const login2faMsg = document.getElementById('login2faMsg');
+        const res = await fetch('/api/verify-2fa', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({code})
+        });
+        if (res.ok) {
+            login2faMsg.textContent = 'Weryfikacja 2FA powiodła się. Przekierowanie...';
+            login2faMsg.style.color = 'green';
+            localStorage.setItem('loggedIn', '1');
+            setTimeout(() => { window.location.href = 'dashboard.html'; }, 600);
+        } else {
+            const err = await res.json().catch(() => ({}));
+            login2faMsg.textContent = err.error || 'Błąd weryfikacji 2FA';
+            login2faMsg.style.color = 'red';
         }
     };
     </script>

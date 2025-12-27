@@ -16,6 +16,17 @@
             <button type="submit">Zarejestruj się</button>
         </form>
         <div id="registerMsg"></div>
+        <div id="twofaSetup" style="display:none; margin-top:10px;">
+            <h3>Konfiguracja 2FA</h3>
+            <p>Zeskanuj poniższy QR w aplikacji uwierzytelniającej (np. Authenticator) lub wpisz klucz ręcznie.</p>
+            <img id="provisionQr" alt="QR 2FA" style="width:200px;height:200px;display:block;margin-bottom:8px;">
+            <div>Klucz: <span id="totpSecret" style="font-family:monospace;"></span></div>
+            <form id="verify2faForm" style="margin-top:8px;">
+                <input type="text" name="code" placeholder="Kod 2FA" required pattern="\d{6}" inputmode="numeric"><br>
+                <button type="submit">Weryfikuj 2FA</button>
+            </form>
+            <div id="twofaMsg"></div>
+        </div>
         <a href="login.html">Masz już konto? Zaloguj się</a>
     </div>
     <script>
@@ -29,19 +40,58 @@
         };
         const res = await fetch('/api/register', {
             method: 'POST',
+            credentials: 'same-origin',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify(data)
         });
         const msg = document.getElementById('registerMsg');
         if (res.ok) {
-            msg.textContent = 'Rejestracja udana!';
+            const body = await res.json();
+            msg.textContent = 'Rejestracja udana! Dokończ konfigurację 2FA.';
             msg.style.color = 'green';
-            localStorage.setItem('loggedIn', '1');
-            setTimeout(() => { window.location.href = 'dashboard.html'; }, 500);
+            // show provisioning QR and secret
+            if (body.provisioning_uri || body.totp_secret) {
+                const twofa = document.getElementById('twofaSetup');
+                const qr = document.getElementById('provisionQr');
+                const secret = document.getElementById('totpSecret');
+                if (body.provisioning_uri) {
+                    qr.src = 'https://chart.googleapis.com/chart?chs=200x200&cht=qr&chl=' + encodeURIComponent(body.provisioning_uri);
+                    qr.style.display = 'block';
+                }
+                secret.textContent = body.totp_secret || '';
+                twofa.style.display = 'block';
+            } else {
+                // fallback redirect
+                localStorage.setItem('loggedIn', '1');
+                setTimeout(() => { window.location.href = 'dashboard.html'; }, 500);
+            }
         } else {
             const err = await res.json();
             msg.textContent = err.error || 'Błąd rejestracji';
             msg.style.color = 'red';
+        }
+    };
+
+    // handle 2FA verification after registration
+    document.getElementById('verify2faForm').onsubmit = async function(e) {
+        e.preventDefault();
+        const code = e.target.code.value.trim();
+        const twofaMsg = document.getElementById('twofaMsg');
+        const res = await fetch('/api/verify-2fa', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({code})
+        });
+        if (res.ok) {
+            twofaMsg.textContent = '2FA skonfigurowane. Przekierowanie...';
+            twofaMsg.style.color = 'green';
+            localStorage.setItem('loggedIn', '1');
+            setTimeout(() => { window.location.href = 'dashboard.html'; }, 600);
+        } else {
+            const err = await res.json();
+            twofaMsg.textContent = err.error || 'Błąd weryfikacji 2FA';
+            twofaMsg.style.color = 'red';
         }
     };
     </script>

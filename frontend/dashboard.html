@@ -26,8 +26,9 @@
         <div id="conversation">
             <h3 id="convTitle">Wybierz użytkownika</h3>
             <div id="messages"></div>
-            <form id="sendForm" style="display:none;">
+            <form id="sendForm" style="display:none;" enctype="multipart/form-data">
                 <input type="text" id="msgInput" placeholder="Napisz wiadomość..." required>
+                <input type="file" id="fileInput" name="attachments" multiple>
                 <button type="submit">Wyślij</button>
             </form>
         </div>
@@ -76,6 +77,22 @@
             }
             textNode.textContent = text;
             wrapper.appendChild(textNode);
+
+            // attachments list
+            if (m.attachments && m.attachments.length) {
+                const attList = document.createElement('div');
+                attList.style.marginTop = '6px';
+                m.attachments.forEach(a => {
+                    const aLink = document.createElement('a');
+                    aLink.href = `/api/attachments/${a.id}`;
+                    aLink.textContent = a.filename;
+                    aLink.target = '_blank';
+                    aLink.style.display = 'inline-block';
+                    aLink.style.marginRight = '8px';
+                    attList.appendChild(aLink);
+                });
+                wrapper.appendChild(attList);
+            }
 
             // Add delete button for sender or recipient
             if (m.sender_id === myId || /* allow recipient to delete too */ false) {
@@ -141,12 +158,21 @@
         e.preventDefault();
         if (!selectedUser) return;
         const msg = document.getElementById('msgInput').value;
+        const fileInput = document.getElementById('fileInput');
+        const form = new FormData();
+        form.append('recipient_id', selectedUser.id);
+        form.append('content', msg);
+        if (fileInput && fileInput.files.length) {
+            for (let i = 0; i < fileInput.files.length; i++) {
+                form.append('attachments', fileInput.files[i]);
+            }
+        }
         await fetch('/api/messages/send', {
             method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ recipient_id: selectedUser.id, content: msg })
+            body: form
         });
         document.getElementById('msgInput').value = '';
+        if (fileInput) fileInput.value = '';
         fetchMessages(selectedUser.id);
     };
     (async ()=>{

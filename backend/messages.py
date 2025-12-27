@@ -54,28 +54,54 @@ def get_conversation(user_id):
            OR (m.sender_id = ? AND m.recipient_id = ?)
         ORDER BY m.created_at ASC
     ''', (my_id, user_id, user_id, my_id)).fetchall()
-    return jsonify({'messages': [
-        {'id': m['id'], 'sender': m['sender'], 'sender_id': m['sender_id'], 'content': m['content'], 'is_read': m['is_read']} for m in messages
-    ]})
+    result = []
+    for m in messages:
+        # fetch attachments for this message
+        atts = db.execute('SELECT id, filename FROM attachments WHERE message_id = ?', (m['id'],)).fetchall()
+        attachments = [{'id': a['id'], 'filename': a['filename']} for a in atts]
+        result.append({'id': m['id'], 'sender': m['sender'], 'sender_id': m['sender_id'], 'content': m['content'], 'is_read': m['is_read'], 'attachments': attachments})
+    return jsonify({'messages': result})
 
 @messages_bp.route('/api/messages/send', methods=['POST'])
 def send_message():
     try:
-        data = request.get_json() or {}
-        recipient_id = data.get('recipient_id')
-        content = (data.get('content') or '').strip()
-        if not recipient_id or not content:
-            return jsonify({'error': 'Brak odbiorcy lub treści.'}), 400
         db = get_db()
         my_id = get_current_user_id()
         if my_id is None:
             return jsonify({'error': 'Nieautoryzowany'}), 401
+
+        # Support both JSON and multipart/form-data (for attachments)
+        if request.content_type and request.content_type.startswith('multipart/form-data'):
+            recipient_id = request.form.get('recipient_id')
+            content = (request.form.get('content') or '').strip()
+        else:
+            data = request.get_json() or {}
+            recipient_id = data.get('recipient_id')
+            content = (data.get('content') or '').strip()
+
+        if not recipient_id or not content:
+            return jsonify({'error': 'Brak odbiorcy lub treści.'}), 400
+
         cur = db.execute(
             'INSERT INTO messages (sender_id, recipient_id, encrypted_content, session_key_encrypted, signature) VALUES (?, ?, ?, ?, ?)',
             (my_id, recipient_id, content, '', '')
         )
+        msg_id = cur.lastrowid
         db.commit()
-        return jsonify({'message': 'Wysłano.', 'id': cur.lastrowid}), 201
+
+        # handle file attachments if any (multipart)
+        if request.files:
+            files = request.files.getlist('attachments')
+            for f in files:
+                filename = f.filename
+                data = f.read()
+                # limit file size (25MB)
+                if len(data) > 25 * 1024 * 1024:
+                    continue
+                db.execute('INSERT INTO attachments (message_id, filename, encrypted_data) VALUES (?, ?, ?)', (msg_id, filename, data))
+            db.commit()
+
+        return jsonify({'message': 'Wysłano.', 'id': msg_id}), 201
     except Exception as e:
         return jsonify({'error': 'Server error', 'details': str(e)}), 500
 
@@ -95,4 +121,26 @@ def delete_message(msg_id):
     db.execute('DELETE FROM messages WHERE id = ?', (msg_id,))
     db.commit()
     return '', 204
+
+
+@messages_bp.route('/api/attachments/<int:att_id>', methods=['GET'])
+def download_attachment(att_id):
+    db = get_db()
+    my_id = get_current_user_id()
+    if my_id is None:
+        return jsonify({'error': 'Nieautoryzowany'}), 401
+    att = db.execute('SELECT message_id, filename, encrypted_data FROM attachments WHERE id = ?', (att_id,)).fetchone()
+    if not att:
+        return jsonify({'error': 'Nie znaleziono załącznika.'}), 404
+    # check permission: user must be sender or recipient of message
+    msg = db.execute('SELECT sender_id, recipient_id FROM messages WHERE id = ?', (att['message_id'],)).fetchone()
+    if not msg:
+        return jsonify({'error': 'Brak powiązanej wiadomości.'}), 404
+    if my_id != msg['sender_id'] and my_id != msg['recipient_id']:
+        return jsonify({'error': 'Brak uprawnień.'}), 403
+    data = att['encrypted_data']
+    # return as attachment
+    from flask import send_file
+    import io
+    return send_file(io.BytesIO(data), download_name=att['filename'], as_attachment=True)
 
