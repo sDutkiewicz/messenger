@@ -1,8 +1,7 @@
 from flask import Blueprint, request, jsonify
 from db import get_db
 from flask import session
-import nh3
-
+from sanitize import clean_input
 
 
 messages_bp = Blueprint('messages', __name__)
@@ -63,16 +62,16 @@ def get_conversation(user_id):
         for a in atts:
             fname = a['filename']
             try:
-                if nh3 and fname:
-                    fname = nh3.clean(fname)
+                if fname:
+                    fname = clean_input(fname)
             except Exception:
                 pass
             attachments.append({'id': a['id'], 'filename': fname})
         # sanitize outgoing content
         content_out = m['content']
         try:
-            if nh3 and content_out:
-                content_out = nh3.clean(content_out)
+            if content_out:
+                content_out = clean_input(content_out)
         except Exception:
             pass
         result.append({'id': m['id'], 'sender': m['sender'], 'sender_id': m['sender_id'], 'content': content_out, 'is_read': m['is_read'], 'attachments': attachments})
@@ -91,8 +90,8 @@ def send_message():
             recipient_id = request.form.get('recipient_id')
             content = (request.form.get('content') or '').strip()
             try:
-                if nh3 and content:
-                    content = nh3.clean(content)
+                if content:
+                    content = clean_input(content)
             except Exception:
                 pass
         else:
@@ -100,8 +99,8 @@ def send_message():
             recipient_id = data.get('recipient_id')
             content = (data.get('content') or '').strip()
             try:
-                if nh3 and content:
-                    content = nh3.clean(content)
+                if content:
+                    content = clean_input(content)
             except Exception:
                 pass
 
@@ -121,8 +120,8 @@ def send_message():
             for f in files:
                 filename = f.filename
                 try:
-                    if nh3 and filename:
-                        filename = nh3.clean(filename)
+                    if filename:
+                        filename = clean_input(filename)
                 except Exception:
                     pass
                 data = f.read()
