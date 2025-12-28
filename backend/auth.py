@@ -1,6 +1,10 @@
 
 from flask import Blueprint, request, jsonify, g, session, make_response, current_app
 from db import get_db
+try:
+    import nh3
+except Exception:
+    nh3 = None
 from argon2 import PasswordHasher
 import os
 import re
@@ -31,7 +35,19 @@ def is_strong_password(password):
 def register():
     data = request.get_json()
     username = data.get('username', '').strip()
+    # sanitize username to reduce XSS/unsafe input
+    try:
+        if nh3:
+            username = nh3.clean(username)
+    except Exception:
+        pass
     email = data.get('email', '').strip().lower()
+    # sanitize email
+    try:
+        if nh3:
+            email = nh3.clean(email)
+    except Exception:
+        pass
     password = data.get('password', '')
 
     if not username or not email or not password:
@@ -110,6 +126,13 @@ def register():
 def login():
     data = request.get_json()
     username = data.get('username', '').strip()
+    # sanitize login username input
+    try:
+        if nh3:
+            username = nh3.clean(username)
+    except Exception:
+        pass
+    # For login we allow username or email in the same field; also sanitize email if provided
     password = data.get('password', '')
     if not username or not password:
         # Do not reveal whether fields are missing or user exists - return generic auth error

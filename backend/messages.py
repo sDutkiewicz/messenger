@@ -1,6 +1,7 @@
 from flask import Blueprint, request, jsonify
 from db import get_db
 from flask import session
+import nh3
 
 
 
@@ -58,8 +59,23 @@ def get_conversation(user_id):
     for m in messages:
         # fetch attachments for this message
         atts = db.execute('SELECT id, filename FROM attachments WHERE message_id = ?', (m['id'],)).fetchall()
-        attachments = [{'id': a['id'], 'filename': a['filename']} for a in atts]
-        result.append({'id': m['id'], 'sender': m['sender'], 'sender_id': m['sender_id'], 'content': m['content'], 'is_read': m['is_read'], 'attachments': attachments})
+        attachments = []
+        for a in atts:
+            fname = a['filename']
+            try:
+                if nh3 and fname:
+                    fname = nh3.clean(fname)
+            except Exception:
+                pass
+            attachments.append({'id': a['id'], 'filename': fname})
+        # sanitize outgoing content
+        content_out = m['content']
+        try:
+            if nh3 and content_out:
+                content_out = nh3.clean(content_out)
+        except Exception:
+            pass
+        result.append({'id': m['id'], 'sender': m['sender'], 'sender_id': m['sender_id'], 'content': content_out, 'is_read': m['is_read'], 'attachments': attachments})
     return jsonify({'messages': result})
 
 @messages_bp.route('/api/messages/send', methods=['POST'])
@@ -74,10 +90,20 @@ def send_message():
         if request.content_type and request.content_type.startswith('multipart/form-data'):
             recipient_id = request.form.get('recipient_id')
             content = (request.form.get('content') or '').strip()
+            try:
+                if nh3 and content:
+                    content = nh3.clean(content)
+            except Exception:
+                pass
         else:
             data = request.get_json() or {}
             recipient_id = data.get('recipient_id')
             content = (data.get('content') or '').strip()
+            try:
+                if nh3 and content:
+                    content = nh3.clean(content)
+            except Exception:
+                pass
 
         if not recipient_id or not content:
             return jsonify({'error': 'Brak odbiorcy lub treści.'}), 400
@@ -94,6 +120,11 @@ def send_message():
             files = request.files.getlist('attachments')
             for f in files:
                 filename = f.filename
+                try:
+                    if nh3 and filename:
+                        filename = nh3.clean(filename)
+                except Exception:
+                    pass
                 data = f.read()
                 # limit file size (25MB)
                 if len(data) > 25 * 1024 * 1024:
