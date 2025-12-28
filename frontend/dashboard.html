@@ -18,7 +18,13 @@
 </head>
 <body>
     <div id="app">
-        <h2>Wiadomości</h2>
+        <header style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+            <h2 style="margin:0">Wiadomości</h2>
+            <div id="userHeader" style="font-size:14px">
+                Zalogowany jako: <strong id="meName">—</strong>
+                <button id="logoutBtn" style="margin-left:10px">Wyloguj</button>
+            </div>
+        </header>
         <div id="usersList">
             <h3>Użytkownicy</h3>
             <ul id="users"></ul>
@@ -40,10 +46,18 @@
     let myId = null;
 
     async function fetchMyId() {
-        const res = await fetch('/api/me');
+        const res = await fetch('/api/me', { credentials: 'same-origin' });
         const data = await res.json();
         myId = data.id;
+        const nameEl = document.getElementById('meName');
+        if (data && data.username) nameEl.textContent = data.username; else nameEl.textContent = '—';
     }
+
+    document.getElementById('logoutBtn').onclick = async function() {
+        await fetch('/api/logout', { method: 'POST', credentials: 'same-origin' });
+        localStorage.removeItem('loggedIn');
+        window.location.href = 'login.html';
+    };
 
     async function fetchUsers() {
         const res = await fetch('/api/users');

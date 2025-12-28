@@ -10,6 +10,7 @@ import qrcode
 import io
 import base64
 import glob
+import sqlite3
 
 auth_bp = Blueprint('auth', __name__)
 ph = PasswordHasher()
@@ -42,16 +43,7 @@ def register():
     if not is_strong_password(password):
         return jsonify({'error': 'Hasło musi mieć min. 12 znaków, dużą i małą literę oraz cyfrę.'}), 400
 
-    db = get_db()
-    # pre-check uniqueness to provide specific UX messages
-    try:
-        if db.execute('SELECT 1 FROM users WHERE username = ?', (username,)).fetchone():
-            return jsonify({'error': 'Nazwa użytkownika już istnieje.'}), 409
-        if db.execute('SELECT 1 FROM users WHERE email = ?', (email,)).fetchone():
-            return jsonify({'error': 'Email już istnieje.'}), 409
-    except Exception:
-        # if check fails, continue and rely on INSERT/IntegrityError handling
-        pass
+    # Do not create user yet — keep registration pending until 2FA verified.
     try:
         password_hash = ph.hash(password)
         # generate TOTP secret for user enrollment
@@ -60,13 +52,7 @@ def register():
         salt = os.urandom(16)
         public_key = 'PUBLIC_KEY_PLACEHOLDER'
         private_key_encrypted = 'PRIVATE_KEY_PLACEHOLDER'
-        cur = db.execute(
-            'INSERT INTO users (username, email, password_hash, salt, public_key, private_key_encrypted, totp_secret) VALUES (?, ?, ?, ?, ?, ?, ?)',
-            (username, email, password_hash, salt, public_key, private_key_encrypted, totp_secret)
-        )
-        db.commit()
-        # set session to newly created (but not fully authenticated) user
-        session['pre_2fa_user_id'] = cur.lastrowid
+
         # build provisioning URI for authenticator apps
         try:
             provisioning_uri = pyotp.TOTP(totp_secret).provisioning_uri(name=email or username, issuer_name='Messenger')
@@ -83,7 +69,7 @@ def register():
                 try:
                     qr_dir = os.path.join(os.path.dirname(__file__), 'static', 'qrs')
                     os.makedirs(qr_dir, exist_ok=True)
-                    filename = f'{cur.lastrowid}_{int(time.time())}.png'
+                    filename = f'reg_{int(time.time())}_{os.urandom(4).hex()}.png'
                     filepath = os.path.join(qr_dir, filename)
                     qr_img.save(filepath, format='PNG')
                     provisioning_qr_path = f'/static/qrs/{filename}'
@@ -95,16 +81,30 @@ def register():
         except Exception:
             provisioning_uri = None
             provisioning_qr = None
+
+        # store pending registration in session (must be JSON-serializable)
+        try:
+            session['reg_pending'] = {
+                'username': username,
+                'email': email,
+                'password_hash': password_hash,
+                'salt_b64': base64.b64encode(salt).decode('ascii'),
+                'public_key': public_key,
+                'private_key_encrypted': private_key_encrypted,
+                'totp_secret': totp_secret,
+                'provisioning_qr_path': provisioning_qr_path
+            }
+        except Exception:
+            # session may fail; fall back to returning QR data only
+            pass
     except Exception as e:
         # Do not reveal whether username or email already exists. Log a short warning.
         try:
             current_app.logger.warning('Registration error: %s', str(e))
         except Exception:
             pass
-        if 'UNIQUE constraint failed' in str(e):
-            return jsonify({'error': 'Rejestracja nie powiodła się.'}), 409
         return jsonify({'error': 'Rejestracja nie powiodła się.'}), 500
-    return jsonify({'message': 'Rejestracja udana. Dokończ konfigurację 2FA.', 'provisioning_uri': provisioning_uri, 'provisioning_qr': provisioning_qr, 'provisioning_qr_path': provisioning_qr_path, 'totp_secret': totp_secret}), 201
+    return jsonify({'message': 'Rejestracja przygotowana. Dokończ konfigurację 2FA.', 'provisioning_uri': provisioning_uri, 'provisioning_qr': provisioning_qr, 'provisioning_qr_path': provisioning_qr_path, 'totp_secret': totp_secret}), 201
 
 @auth_bp.route('/api/login', methods=['POST'])
 def login():
@@ -182,12 +182,81 @@ def login():
 def verify_2fa():
     data = request.get_json() or {}
     code = str(data.get('code', '')).strip()
-    # determine user: prefer pre_2fa_user_id (set after password verify)
+    db = get_db()
+
+    # Case A: finishing pending registration stored in session
+    reg = session.get('reg_pending')
+    if reg is not None:
+        if not code:
+            return jsonify({'error': 'Weryfikacja 2FA nie powiodła się.'}), 401
+        totp_secret = reg.get('totp_secret')
+        if not totp_secret:
+            return jsonify({'error': 'Weryfikacja 2FA nie powiodła się.'}), 401
+        try:
+            totp = pyotp.TOTP(totp_secret)
+            ok = totp.verify(code, valid_window=1)
+        except Exception:
+            ok = False
+
+        # log attempt (username may be present)
+        try:
+            db.execute('INSERT INTO login_attempts (username, success) VALUES (?, ?)', (reg.get('username'), 1 if ok else 0))
+            db.commit()
+        except Exception:
+            pass
+
+        if not ok:
+            time.sleep(0.5)
+            return jsonify({'error': 'Weryfikacja 2FA nie powiodła się.'}), 401
+
+        # attempt to insert user into DB now
+        try:
+            salt_bytes = base64.b64decode(reg.get('salt_b64')) if reg.get('salt_b64') else os.urandom(16)
+            cur = db.execute(
+                'INSERT INTO users (username, email, password_hash, salt, public_key, private_key_encrypted, totp_secret) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                (reg.get('username'), reg.get('email'), reg.get('password_hash'), salt_bytes, reg.get('public_key'), reg.get('private_key_encrypted'), reg.get('totp_secret'))
+            )
+            db.commit()
+            new_id = cur.lastrowid
+        except sqlite3.IntegrityError as e:
+            # specific conflict messages
+            m = str(e)
+            try:
+                if 'users.username' in m:
+                    return jsonify({'error': 'Nazwa użytkownika już istnieje.'}), 409
+                if 'users.email' in m:
+                    return jsonify({'error': 'Email już istnieje.'}), 409
+            except Exception:
+                pass
+            return jsonify({'error': 'Rejestracja nie powiodła się.'}), 409
+        except Exception:
+            return jsonify({'error': 'Rejestracja nie powiodła się.'}), 500
+
+        # finalize session
+        session.pop('reg_pending', None)
+        session['user_id'] = new_id
+        session['2fa_verified'] = True
+
+        # cleanup QR file if saved
+        try:
+            qr_path = reg.get('provisioning_qr_path')
+            if qr_path and qr_path.startswith('/static/qrs/'):
+                fs_path = os.path.join(os.path.dirname(__file__), qr_path.lstrip('/'))
+                if os.path.exists(fs_path):
+                    try:
+                        os.remove(fs_path)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        return jsonify({'message': 'Rejestracja zakończona pomyślnie.', 'id': new_id}), 201
+
+    # Case B: existing user finishing login 2FA
     pre_id = session.get('pre_2fa_user_id')
     if not pre_id or not code:
         # generic error (don't reveal reason)
         return jsonify({'error': 'Weryfikacja 2FA nie powiodła się.'}), 401
-    db = get_db()
     user = db.execute('SELECT * FROM users WHERE id = ?', (pre_id,)).fetchone()
     if not user:
         return jsonify({'error': 'Weryfikacja 2FA nie powiodła się.'}), 401
@@ -245,3 +314,15 @@ def verify_2fa():
         pass
 
     return jsonify({'message': 'Weryfikacja 2FA zakończona pomyślnie.', 'id': user['id']}), 200
+
+
+@auth_bp.route('/api/logout', methods=['POST'])
+def logout():
+    try:
+        session.pop('user_id', None)
+        session.pop('pre_2fa_user_id', None)
+        session.pop('reg_pending', None)
+        session.pop('2fa_verified', None)
+    except Exception:
+        pass
+    return jsonify({'message': 'Wylogowano.'}), 200
