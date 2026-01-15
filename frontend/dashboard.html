@@ -202,6 +202,23 @@
         if (!res.ok) return;
         const data = await res.json();
         const messagesDiv = document.getElementById('messages');
+        
+        // Porównaj ilość wiadomości - jeśli się nie zmieniły, nie renderuj
+        const currentCount = messagesDiv.querySelectorAll('.message-item').length;
+        if (currentCount === data.messages.length && currentCount > 0) {
+            // Sprawdź ostatnią wiadomość
+            const lastItemText = messagesDiv.querySelector('.message-item:last-child span')?.textContent || '';
+            const lastMessageInData = data.messages[data.messages.length - 1];
+            // Jeśli ostatnia wiadomość się nie zmieniła, pomijamy re-render
+            if (lastItemText.includes(lastMessageInData.sender)) {
+                return;
+            }
+        }
+        
+        // Smooth transition - fade out, clear, fade in
+        messagesDiv.style.opacity = '0.5';
+        messagesDiv.style.transition = 'opacity 0.1s ease-in-out';
+        
         messagesDiv.innerHTML = '';
         
         for (const m of data.messages) {
@@ -253,6 +270,10 @@
                             if (signatureValid) {
                                 text += ' ✓';
                             }
+                            // Przechowaj dane do weryfikacji w wrapper
+                            wrapper.dataset.plaintext = plaintext;
+                            wrapper.dataset.signature = m.signature || '';
+                            wrapper.dataset.senderId = m.sender_id;
                         }
                     }
                 } else {
@@ -295,10 +316,60 @@
                     }
                 };
                 wrapper.appendChild(delBtn);
+            } else {
+                // Przycisk Zweryfikuj dla otrzymanych wiadomości - obok tekstu
+                if (wrapper.dataset.plaintext && wrapper.dataset.signature) {
+                    const verifyBtn = document.createElement('button');
+                    verifyBtn.textContent = 'Zweryfikuj';
+                    verifyBtn.style.display = 'inline-block';
+                    verifyBtn.style.padding = '2px 6px';
+                    verifyBtn.style.fontSize = '11px';
+                    verifyBtn.style.backgroundColor = '#007bff';
+                    verifyBtn.style.color = 'white';
+                    verifyBtn.style.border = 'none';
+                    verifyBtn.style.borderRadius = '3px';
+                    verifyBtn.style.cursor = 'pointer';
+                    verifyBtn.style.marginLeft = '4px';
+                    verifyBtn.style.verticalAlign = 'middle';
+                    
+                    verifyBtn.onclick = async (e) => {
+                        e.stopPropagation();
+                        const plaintext = wrapper.dataset.plaintext;
+                        const signature = wrapper.dataset.signature;
+                        const senderId = wrapper.dataset.senderId;
+                        
+                        if (!signature) {
+                            alert('❌ Wiadomość nie ma podpisu - nie można weryfikować autentyczności');
+                            return;
+                        }
+                        
+                        try {
+                            const senderPublicKey = await getSenderPublicKey(parseInt(senderId));
+                            if (!senderPublicKey) {
+                                alert('❌ Nie można pobrać klucza publicznego nadawcy');
+                                return;
+                            }
+                            
+                            const isValid = await verifySignature(plaintext, signature, senderPublicKey);
+                            if (isValid) {
+                                alert('✓ Wiadomość jest autentyczna!\n\nPodpis zweryfikowany poprawnie. Wiadomość pochodzi od ' + m.sender);
+                            } else {
+                                alert('❌ Wiadomość NIE jest autentyczna!\n\nPodpis jest nieprawidłowy. Wiadomość mogła zostać zmieniona!');
+                            }
+                        } catch (error) {
+                            alert('❌ Błąd weryfikacji: ' + error.message);
+                        }
+                    };
+                    
+                    textNode.appendChild(verifyBtn);
+                }
             }
 
             messagesDiv.appendChild(wrapper);
         }
+        
+        // Fade in po załadowaniu
+        messagesDiv.style.opacity = '1';
         messagesDiv.scrollTop = messagesDiv.scrollHeight;
     }
 
