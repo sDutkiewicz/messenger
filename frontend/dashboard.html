@@ -26,6 +26,7 @@
             <form id="sendForm" enctype="multipart/form-data">
                 <input type="text" id="msgInput" placeholder="Napisz wiadomość..." required>
                 <input type="file" id="fileInput" name="attachments" multiple>
+                <div id="attachmentsList"></div>
                 <button type="submit">Wyślij</button>
             </form>
         </div>
@@ -157,6 +158,58 @@
         startConversationPolling(user.id);
     }
 
+    function updateAttachmentsList() {
+        const fileInput = document.getElementById('fileInput');
+        const attachmentsList = document.getElementById('attachmentsList');
+        attachmentsList.innerHTML = '';
+        if (!fileInput.files.length) return;
+        const listDiv = document.createElement('div');
+        listDiv.style.marginTop = '8px';
+        listDiv.style.padding = '8px';
+        listDiv.style.backgroundColor = '#f0f0f0';
+        listDiv.style.borderRadius = '4px';
+        const title = document.createElement('strong');
+        title.textContent = 'Załączniki (' + fileInput.files.length + '):';
+        listDiv.appendChild(title);
+        const fileList = document.createElement('div');
+        fileList.style.marginTop = '6px';
+        Array.from(fileInput.files).forEach((file, index) => {
+            const fileItemDiv = document.createElement('div');
+            fileItemDiv.style.display = 'flex';
+            fileItemDiv.style.justifyContent = 'space-between';
+            fileItemDiv.style.alignItems = 'center';
+            fileItemDiv.style.padding = '4px';
+            fileItemDiv.style.borderBottom = '1px solid #ddd';
+            const nameSpan = document.createElement('span');
+            nameSpan.textContent = file.name + ' (' + (file.size / 1024).toFixed(1) + ' KB)';
+            fileItemDiv.appendChild(nameSpan);
+            const removeBtn = document.createElement('button');
+            removeBtn.type = 'button';
+            removeBtn.textContent = '✕';
+            removeBtn.style.padding = '2px 8px';
+            removeBtn.style.backgroundColor = '#ff6b6b';
+            removeBtn.style.color = 'white';
+            removeBtn.style.border = 'none';
+            removeBtn.style.borderRadius = '3px';
+            removeBtn.style.cursor = 'pointer';
+            removeBtn.onclick = (e) => {
+                e.preventDefault();
+                const dt = new DataTransfer();
+                Array.from(fileInput.files).forEach((f, i) => {
+                    if (i !== index) dt.items.add(f);
+                });
+                fileInput.files = dt.files;
+                updateAttachmentsList();
+            };
+            fileItemDiv.appendChild(removeBtn);
+            fileList.appendChild(fileItemDiv);
+        });
+        listDiv.appendChild(fileList);
+        attachmentsList.appendChild(listDiv);
+    }
+
+    document.getElementById('fileInput').onchange = updateAttachmentsList;
+
     document.getElementById('sendForm').onsubmit = async function(e) {
         e.preventDefault();
         if (!selectedUser) return;
@@ -170,13 +223,24 @@
                 form.append('attachments', fileInput.files[i]);
             }
         }
-        await fetch('/api/messages/send', {
-            method: 'POST',
-            body: form
-        });
-        document.getElementById('msgInput').value = '';
-        if (fileInput) fileInput.value = '';
-        fetchMessages(selectedUser.id);
+        try {
+            const response = await fetch('/api/messages/send', {
+                method: 'POST',
+                body: form,
+                credentials: 'same-origin'
+            });
+            const data = await response.json();
+            if (!response.ok) {
+                alert('Błąd wysyłania: ' + (data.error || 'Nieznany błąd'));
+                return;
+            }
+            document.getElementById('msgInput').value = '';
+            if (fileInput) fileInput.value = '';
+            document.getElementById('attachmentsList').innerHTML = '';
+            fetchMessages(selectedUser.id);
+        } catch (error) {
+            alert('Błąd wysyłania: ' + error.message);
+        }
     };
 
     (async ()=>{

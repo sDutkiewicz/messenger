@@ -119,6 +119,11 @@ def send_message():
 
         if not recipient_id or not content:
             return jsonify({'error': 'Brak odbiorcy lub treści.'}), 400
+        
+        try:
+            recipient_id = int(recipient_id)
+        except (ValueError, TypeError):
+            return jsonify({'error': 'Nieprawidłowy odbiorca.'}), 400
 
         cur = db.execute(
             'INSERT INTO messages (sender_id, recipient_id, encrypted_content, session_key_encrypted, signature) VALUES (?, ?, ?, ?, ?)',
