@@ -1,20 +1,22 @@
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, send_file
 from db import get_db
 from flask import session
 from sanitize import clean_input
+import io
 
 
+# Blueprint for message-related routes
 messages_bp = Blueprint('messages', __name__)
 
 
-def get_current_user_id():
+def get_current_user_id(): # return logged-in user ID from session
     user_id = session.get('user_id')
     if user_id is None:
         # For demo: return 1 (alice) if not logged in
         return 1
     return user_id
 
-@messages_bp.route('/api/users', methods=['GET'])
+@messages_bp.route('/api/users', methods=['GET']) # show list of users
 def list_users():
     db = get_db()
     my_id = get_current_user_id()
@@ -22,7 +24,7 @@ def list_users():
     return jsonify([{'id': u['id'], 'username': u['username']} for u in users])
 
 
-@messages_bp.route('/api/me', methods=['GET'])
+@messages_bp.route('/api/me', methods=['GET']) # get current user info
 def get_me():
     db = get_db()
     my_id = get_current_user_id()
@@ -33,10 +35,15 @@ def get_me():
         return jsonify({'id': None, 'username': None}), 200
     return jsonify({'id': user['id'], 'username': user['username']})
 
+
+
+# Get conversation with another user
 @messages_bp.route('/api/messages/conversation/<int:user_id>', methods=['GET'])
 def get_conversation(user_id):
     db = get_db()
     my_id = get_current_user_id()
+
+
     # mark messages sent to me by this user as read
     try:
         db.execute(
@@ -46,6 +53,8 @@ def get_conversation(user_id):
         db.commit()
     except Exception:
         pass
+
+    # fetch messages between me and the other user
     messages = db.execute('''
         SELECT m.id, m.sender_id, m.recipient_id, m.encrypted_content as content, m.is_read, u.username as sender
         FROM messages m
@@ -55,6 +64,8 @@ def get_conversation(user_id):
         ORDER BY m.created_at ASC
     ''', (my_id, user_id, user_id, my_id)).fetchall()
     result = []
+
+    # sanitize outgoing messages and attachments
     for m in messages:
         # fetch attachments for this message
         atts = db.execute('SELECT id, filename FROM attachments WHERE message_id = ?', (m['id'],)).fetchall()
@@ -77,6 +88,8 @@ def get_conversation(user_id):
         result.append({'id': m['id'], 'sender': m['sender'], 'sender_id': m['sender_id'], 'content': content_out, 'is_read': m['is_read'], 'attachments': attachments})
     return jsonify({'messages': result})
 
+
+# send a new message
 @messages_bp.route('/api/messages/send', methods=['POST'])
 def send_message():
     try:
@@ -136,41 +149,52 @@ def send_message():
         return jsonify({'error': 'Server error', 'details': str(e)}), 500
 
 
+
+# Delete a message
 @messages_bp.route('/api/messages/<int:msg_id>', methods=['DELETE'])
 def delete_message(msg_id):
     """Delete a message if requester is sender or recipient."""
     db = get_db()
     my_id = get_current_user_id()
+
+
     if my_id is None:
-        return jsonify({'error': 'Nieautoryzowany'}), 401
+        return jsonify({'error': 'Non-authorized'}), 401
+    
+
     msg = db.execute('SELECT sender_id, recipient_id FROM messages WHERE id = ?', (msg_id,)).fetchone()
     if not msg:
-        return jsonify({'error': 'Nie znaleziono wiadomości.'}), 404
+        return jsonify({'error': 'Message not found.'}), 404
+    
     if my_id != msg['sender_id'] and my_id != msg['recipient_id']:
-        return jsonify({'error': 'Brak uprawnień.'}), 403
+        return jsonify({'error': 'No permission.'}), 403
+    
     db.execute('DELETE FROM messages WHERE id = ?', (msg_id,))
     db.commit()
-    return '', 204
+    return '', 204 # No Content
 
 
+
+# Download attachment
 @messages_bp.route('/api/attachments/<int:att_id>', methods=['GET'])
 def download_attachment(att_id):
     db = get_db()
     my_id = get_current_user_id()
     if my_id is None:
-        return jsonify({'error': 'Nieautoryzowany'}), 401
+        return jsonify({'error': 'Non-authorized'}), 401
     att = db.execute('SELECT message_id, filename, encrypted_data FROM attachments WHERE id = ?', (att_id,)).fetchone()
     if not att:
-        return jsonify({'error': 'Nie znaleziono załącznika.'}), 404
+        return jsonify({'error': 'Attachment not found.'}), 404
+    
     # check permission: user must be sender or recipient of message
     msg = db.execute('SELECT sender_id, recipient_id FROM messages WHERE id = ?', (att['message_id'],)).fetchone()
     if not msg:
-        return jsonify({'error': 'Brak powiązanej wiadomości.'}), 404
+        return jsonify({'error': 'Related message not found.'}), 404
     if my_id != msg['sender_id'] and my_id != msg['recipient_id']:
-        return jsonify({'error': 'Brak uprawnień.'}), 403
+        return jsonify({'error': 'No permission.'}), 403
     data = att['encrypted_data']
     # return as attachment
-    from flask import send_file
-    import io
+
+    
     return send_file(io.BytesIO(data), download_name=att['filename'], as_attachment=True)
 

@@ -2,9 +2,11 @@ import sqlite3
 from flask import g
 import os
 
+
+# database path configuration
 DATABASE = os.getenv('DATABASE_PATH', os.path.join(os.path.dirname(__file__), 'data', 'messenger.db'))
 
-def get_db():
+def get_db(): # connect to the database
     if 'db' not in g:
         g.db = sqlite3.connect(DATABASE)
         g.db.row_factory = sqlite3.Row
@@ -17,11 +19,17 @@ def close_db(e=None):
 
 
 def init_db():
-    """Initialize the database and create tables if they do not exist. Insert example users if empty."""
-    # ensure directory exists
+    """Initialize the database and create tables if 
+    they do not exist. Insert example users if empty."""
+    #
+    #  ensure directory exists
     db_dir = os.path.dirname(DATABASE)
+    
     if not os.path.exists(db_dir):
         os.makedirs(db_dir, exist_ok=True)
+    
+
+    # creating tables
     db = sqlite3.connect(DATABASE)
     cursor = db.cursor()
     cursor.executescript('''
@@ -70,7 +78,7 @@ def init_db():
     db.close()
     add_example_users()
 
-# Add example users (alice, bob, carol) if they do not exist
+# Add example users (alice, bob, carol) for testing
 def add_example_users():
     db = sqlite3.connect(DATABASE)
     cursor = db.cursor()

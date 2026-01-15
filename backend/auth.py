@@ -38,10 +38,16 @@ def register():
 
     if not username or not email or not password:
         return jsonify({'error': 'Wszystkie pola są wymagane.'}), 400
+    
+
     if len(username) < 3 or len(username) > 32 or not re.match(r'^[a-zA-Z0-9_.-]+$', username):
         return jsonify({'error': 'Nieprawidłowa nazwa użytkownika.'}), 400
+    
+
     if not re.match(r'^\S+@\S+\.\S+$', email):
         return jsonify({'error': 'Nieprawidłowy email.'}), 400
+    
+    
     if not is_strong_password(password):
         return jsonify({'error': 'Hasło musi mieć min. 12 znaków, dużą i małą literę oraz cyfrę.'}), 400
 
@@ -69,11 +75,12 @@ def register():
                 provisioning_qr = f'data:image/png;base64,{qr_b64}'
                 # also save a temporary file on disk and provide a static URL
                 try:
-                    qr_dir = os.path.join(os.path.dirname(__file__), 'static', 'qrs')
+                    qr_dir = os.path.join(os.path.dirname(__file__), 'static', 'qrs') # ensure directory exists
                     os.makedirs(qr_dir, exist_ok=True)
-                    filename = f'reg_{int(time.time())}_{os.urandom(4).hex()}.png'
+
+                    filename = f'reg_{int(time.time())}_{os.urandom(4).hex()}.png' # unique filename
                     filepath = os.path.join(qr_dir, filename)
-                    qr_img.save(filepath, format='PNG')
+                    qr_img.save(filepath, format='PNG') # save file
                     provisioning_qr_path = f'/static/qrs/{filename}'
                 except Exception:
                     provisioning_qr_path = None
@@ -114,17 +121,19 @@ def login():
     username = clean_input(data.get('username', '').strip())
     password = data.get('password', '')
     if not username or not password:
-        # Do not reveal whether fields are missing or user exists - return generic auth error
-        time.sleep(0.2)
+       
         return jsonify({'error': 'Nieprawidłowe dane logowania.'}), 401
     db = get_db()
+
     # rate limiting / anti-brute-force: count recent failed attempts for this username
     MAX_FAILED = 5
     WINDOW = "-15 minutes"
+
     cur = db.execute(
         "SELECT COUNT(*) as c FROM login_attempts WHERE username = ? AND success = 0 AND timestamp > datetime('now', ?)",
         (username, WINDOW)
     ).fetchone()
+
     failed_count = cur['c'] if cur is not None else 0
     if failed_count >= MAX_FAILED:
         resp = make_response(jsonify({'error': 'Zbyt wiele nieudanych prób logowania. Spróbuj później.'}), 429)
@@ -137,7 +146,8 @@ def login():
     ).fetchone()
 
     success = 0
-    # Always avoid revealing whether username exists
+    
+    # verify password if user found
     if user:
         try:
             ph.verify(user['password_hash'], password)
@@ -166,12 +176,14 @@ def login():
         user_totp = user['totp_secret'] if user else None
     except Exception:
         user_totp = None
+
+    # check if TOTP is set up (not placeholder)
     if user and user_totp and user_totp != 'TOTP_SECRET_PLACEHOLDER':
         # set pre-auth session and ask client to verify 2FA
         session['pre_2fa_user_id'] = user['id']
         return jsonify({'message': 'Wymagana weryfikacja 2FA.', '2fa_required': True}), 200
 
-    # successful login without 2FA
+    # successful login without 2FA (for example users without 2FA configured)
     session['user_id'] = user['id']
     try:
         db.execute('UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE id = ?', (user['id'],))
@@ -179,6 +191,8 @@ def login():
     except Exception:
         pass
     return jsonify({'message': 'Zalogowano pomyślnie.', 'id': user['id']}), 200
+
+
 
 @auth_bp.route('/api/verify-2fa', methods=['POST'])
 def verify_2fa():
@@ -220,6 +234,8 @@ def verify_2fa():
             )
             db.commit()
             new_id = cur.lastrowid
+
+
         except sqlite3.IntegrityError as e:
             # specific conflict messages
             m = str(e)
@@ -264,11 +280,13 @@ def verify_2fa():
         return jsonify({'error': 'Weryfikacja 2FA nie powiodła się.'}), 401
 
     try:
-        totp_secret = user['totp_secret']
+        totp_secret = user['totp_secret'] # may raise Exception
     except Exception:
         totp_secret = None
-    # don't reveal whether 2FA is configured
-    if not totp_secret or totp_secret == 'TOTP_SECRET_PLACEHOLDER':
+
+
+    # not revealing whether TOTP is configured
+    if not totp_secret or totp_secret == 'TOTP_SECRET_PLACEHOLDER': 
         # record failed attempt
         try:
             db.execute('INSERT INTO login_attempts (username, success) VALUES (?, ?)', (user['username'], 0))
