@@ -10,19 +10,19 @@
     <div id="app">
         <h2>Rejestracja</h2>
         <form id="registerForm">
-            <input type="text" name="username" placeholder="Nazwa użytkownika" required minlength="3" maxlength="32"><br>
-            <input type="email" name="email" placeholder="Email" required><br>
-            <input type="password" name="password" placeholder="Hasło" required minlength="12"><br>
+            <input type="text" name="username" placeholder="Nazwa użytkownika" required minlength="3" maxlength="32">
+            <input type="email" name="email" placeholder="Email" required>
+            <input type="password" name="password" placeholder="Hasło" required minlength="12">
             <button type="submit">Zarejestruj się</button>
         </form>
         <div id="registerMsg"></div>
-        <div id="twofaSetup" style="display:none; margin-top:10px;">
+        <div id="twofaSetup">
             <h3>Konfiguracja 2FA</h3>
             <p>Zeskanuj poniższy QR w aplikacji uwierzytelniającej (np. Authenticator) lub wpisz klucz ręcznie.</p>
-            <img id="provisionQr" alt="QR 2FA" style="width:200px;height:200px;display:block;margin-bottom:8px;">
-            <div>Klucz: <span id="totpSecret" style="font-family:monospace;"></span></div>
-            <form id="verify2faForm" style="margin-top:8px;">
-                <input type="text" name="code" placeholder="Kod 2FA" required pattern="\d{6}" inputmode="numeric"><br>
+            <img id="provisionQr" alt="QR 2FA">
+            <div>Klucz: <span id="totpSecret"></span></div>
+            <form id="verify2faForm">
+                <input type="text" name="code" placeholder="Kod 2FA" required pattern="\d{6}" inputmode="numeric">
                 <button type="submit">Weryfikuj 2FA</button>
             </form>
             <div id="twofaMsg"></div>
@@ -49,26 +49,20 @@
             const body = await res.json();
             msg.textContent = 'Rejestracja udana! Dokończ konfigurację 2FA.';
             msg.style.color = 'green';
-            // show provisioning QR and secret
             if (body.provisioning_qr || body.provisioning_uri || body.totp_secret) {
                 const twofa = document.getElementById('twofaSetup');
                 const qr = document.getElementById('provisionQr');
                 const secret = document.getElementById('totpSecret');
-                // prefer server-generated data URL, else server-saved path, else external chart
                 if (body.provisioning_qr) {
                     qr.src = body.provisioning_qr;
-                    qr.style.display = 'block';
                 } else if (body.provisioning_qr_path) {
                     qr.src = body.provisioning_qr_path;
-                    qr.style.display = 'block';
                 } else if (body.provisioning_uri) {
                     qr.src = 'https://chart.googleapis.com/chart?chs=200x200&cht=qr&chl=' + encodeURIComponent(body.provisioning_uri);
-                    qr.style.display = 'block';
                 }
                 secret.textContent = body.totp_secret || '';
                 twofa.style.display = 'block';
             } else {
-                // fallback redirect
                 localStorage.setItem('loggedIn', '1');
                 setTimeout(() => { window.location.href = 'dashboard.html'; }, 500);
             }
@@ -79,7 +73,6 @@
         }
     };
 
-    // handle 2FA verification after registration
     document.getElementById('verify2faForm').onsubmit = async function(e) {
         e.preventDefault();
         const code = e.target.code.value.trim();

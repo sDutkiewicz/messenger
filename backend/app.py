@@ -49,6 +49,14 @@ def serve_register():
 def serve_dashboard():
     return send_from_directory(FRONTEND_DIR, 'dashboard.html')
 
+@app.route('/styles.css')
+def serve_styles():
+    return send_from_directory(FRONTEND_DIR, 'styles.css')
+
+@app.route('/<path:filename>')
+def serve_static(filename):
+    return send_from_directory(FRONTEND_DIR, filename)
+
 # Database connection hooks
 @app.before_request
 def before_request():

@@ -5,42 +5,32 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Messenger - Dashboard</title>
     <link rel="stylesheet" href="styles.css">
-    <style>
-        #usersList { max-width: 200px; float: left; margin-right: 30px; }
-        #conversation { max-width: 500px; float: left; }
-        #usersList ul { list-style: none; padding: 0; }
-        #usersList li { padding: 10px; border-bottom: 1px solid #eee; cursor: pointer; }
-        #usersList li.selected { background: #e0e7ff; font-weight: bold; }
-        #messages { min-height: 200px; border: 1px solid #eee; padding: 10px; background: #fafbff; margin-bottom: 10px; }
-        #sendForm { display: flex; gap: 10px; }
-        #sendForm input, #sendForm button { flex: 1; }
-    </style>
 </head>
 <body>
     <div id="app">
-        <header style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
-            <h2 style="margin:0">Wiadomości</h2>
-            <div id="userHeader" style="font-size:14px">
+        <header>
+            <h2>Wiadomości</h2>
+            <div id="userHeader">
                 Zalogowany jako: <strong id="meName">—</strong>
-                <button id="logoutBtn" style="margin-left:10px">Wyloguj</button>
+                <button id="logoutBtn">Wyloguj</button>
             </div>
         </header>
-        <div id="usersList">
-            <h3>Użytkownicy</h3>
-            <ul id="users"></ul>
-        </div>
-        <div id="conversation">
+        <div class="dashboard-container">
+            <div id="usersList">
+                <h3>Użytkownicy</h3>
+                <ul id="users"></ul>
+            </div>
+            <div id="conversation">
             <h3 id="convTitle">Wybierz użytkownika</h3>
             <div id="messages"></div>
-            <form id="sendForm" style="display:none;" enctype="multipart/form-data">
+            <form id="sendForm" enctype="multipart/form-data">
                 <input type="text" id="msgInput" placeholder="Napisz wiadomość..." required>
                 <input type="file" id="fileInput" name="attachments" multiple>
                 <button type="submit">Wyślij</button>
             </form>
         </div>
-        <div style="clear:both;"></div>
+        </div>
     </div>
-    <script src="dashboard.js"></script>
     <script>
     let selectedUser = null;
     let myId = null;
@@ -92,7 +82,6 @@
             textNode.textContent = text;
             wrapper.appendChild(textNode);
 
-            // attachments list
             if (m.attachments && m.attachments.length) {
                 const attList = document.createElement('div');
                 attList.style.marginTop = '6px';
@@ -108,11 +97,10 @@
                 wrapper.appendChild(attList);
             }
 
-            // Add delete button for sender or recipient
-            if (m.sender_id === myId || /* allow recipient to delete too */ false) {
+            if (m.sender_id === myId) {
                 const delBtn = document.createElement('button');
                 delBtn.textContent = 'Usuń';
-                delBtn.style.marginLeft = '10px';
+                delBtn.className = 'delete-btn';
                 delBtn.onclick = async (e) => {
                     e.stopPropagation();
                     if (!confirm('Na pewno usunąć wiadomość?')) return;
@@ -131,6 +119,7 @@
         });
         messagesDiv.scrollTop = messagesDiv.scrollHeight;
     }
+
     let pollIntervalId = null;
     let usersIntervalId = null;
 
@@ -160,14 +149,14 @@
     function selectUser(user) {
         selectedUser = user;
         document.getElementById('convTitle').textContent = 'Rozmowa z: ' + user.username;
-        document.getElementById('sendForm').style.display = '';
-        // highlight selected
+        document.getElementById('sendForm').style.display = 'flex';
         document.querySelectorAll('#users li').forEach(li => li.classList.remove('selected'));
         const node = Array.from(document.querySelectorAll('#users li')).find(n => n.dataset.id == user.id);
         if (node) node.classList.add('selected');
         fetchMessages(user.id);
         startConversationPolling(user.id);
     }
+
     document.getElementById('sendForm').onsubmit = async function(e) {
         e.preventDefault();
         if (!selectedUser) return;
@@ -189,6 +178,7 @@
         if (fileInput) fileInput.value = '';
         fetchMessages(selectedUser.id);
     };
+
     (async ()=>{
         await fetchMyId();
         await fetchUsers();
