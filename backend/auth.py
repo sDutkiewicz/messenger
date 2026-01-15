@@ -3,6 +3,11 @@ from flask import Blueprint, request, jsonify, g, session, make_response, curren
 from db import get_db
 from sanitize import clean_input
 from argon2 import PasswordHasher
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives import serialization
+from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2
+from cryptography.hazmat.backends import default_backend
 import os
 import re
 import time
@@ -12,6 +17,7 @@ import io
 import base64
 import glob
 import sqlite3
+import hashlib
 
 auth_bp = Blueprint('auth', __name__)
 ph = PasswordHasher()
@@ -27,6 +33,74 @@ def is_strong_password(password):
     if not re.search(r'\d', password):
         return False
     return True
+
+
+# ========== ENCRYPTION HELPERS ==========
+
+def generate_rsa_keypair():
+    """Generate RSA 2048-bit key pair"""
+    private_key = rsa.generate_private_key(
+        public_exponent=65537,
+        key_size=2048,
+        backend=default_backend()
+    )
+    public_key = private_key.public_key()
+    
+    # Serialize public key
+    public_pem = public_key.public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo
+    ).decode('utf-8')
+    
+    # Serialize private key (unencrypted for now)
+    private_pem = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption()
+    ).decode('utf-8')
+    
+    return public_pem, private_pem
+
+
+def encrypt_private_key(private_key_pem, password, salt):
+    """Encrypt private key using password-derived key"""
+    # Derive encryption key from password
+    kdf = PBKDF2(
+        algorithm=hashlib.sha256(),
+        length=32,
+        salt=salt,
+        iterations=100000,
+        backend=default_backend()
+    )
+    key = base64.urlsafe_b64encode(kdf.derive(password.encode()))
+    
+    # Encrypt private key
+    cipher = Fernet(key)
+    encrypted = cipher.encrypt(private_key_pem.encode())
+    
+    return encrypted.decode('utf-8')
+
+
+def decrypt_private_key(encrypted_key_str, password, salt):
+    """Decrypt private key using password-derived key"""
+    try:
+        # Derive decryption key from password
+        kdf = PBKDF2(
+            algorithm=hashlib.sha256(),
+            length=32,
+            salt=salt,
+            iterations=100000,
+            backend=default_backend()
+        )
+        key = base64.urlsafe_b64encode(kdf.derive(password.encode()))
+        
+        # Decrypt private key
+        cipher = Fernet(key)
+        decrypted = cipher.decrypt(encrypted_key_str.encode())
+        
+        return decrypted.decode('utf-8')
+    except Exception:
+        return None
 
 
 # ========== HELPER FUNCTIONS ==========
@@ -183,12 +257,18 @@ def register():
     # Do not create user yet — keep registration pending until 2FA verified.
     try:
         password_hash = ph.hash(password)
+        
+        # Generate RSA key pair for message encryption
+        public_key, private_key = generate_rsa_keypair()
+        
+        # Generate salt for key encryption
+        salt = os.urandom(16)
+        
+        # Encrypt private key with password-derived key
+        private_key_encrypted = encrypt_private_key(private_key, password, salt)
+        
         # generate TOTP secret for user enrollment
         totp_secret = pyotp.random_base32()
-        # Placeholder for salt, public/private key
-        salt = os.urandom(16)
-        public_key = 'PUBLIC_KEY_PLACEHOLDER'
-        private_key_encrypted = 'PRIVATE_KEY_PLACEHOLDER'
 
         # build provisioning URI for authenticator apps
         try:
@@ -403,4 +483,42 @@ def _verify_2fa_login(code, db):
     return complete_2fa_login(user)
 
 
-# ========== LOGOUT ==========
+# ========== PRIVATE KEY RETRIEVAL ==========
+
+@auth_bp.route('/api/get-private-key', methods=['POST'])
+def get_private_key():
+    """Get decrypted private key for logged-in user"""
+    data = request.get_json() or {}
+    password = data.get('password', '')
+    
+    user_id = session.get('user_id')
+    if not user_id:
+        return jsonify({'error': 'Nieautoryzowany.'}), 401
+    
+    db = get_db()
+    user = db.execute('SELECT * FROM users WHERE id = ?', (user_id,)).fetchone()
+    
+    if not user:
+        return jsonify({'error': 'Użytkownik nie znaleziony.'}), 404
+    
+    # Verify password
+    try:
+        ph.verify(user['password_hash'], password)
+    except Exception:
+        return jsonify({'error': 'Nieprawidłowe hasło.'}), 401
+    
+    # Decrypt private key
+    try:
+        salt = user['salt']
+        encrypted_key = user['private_key_encrypted']
+        private_key = decrypt_private_key(encrypted_key, password, salt)
+        
+        if not private_key:
+            return jsonify({'error': 'Nie udało się odszyfrować klucza prywatnego.'}), 500
+        
+        return jsonify({'private_key': private_key}), 200
+    except Exception as e:
+        current_app.logger.error('Error decrypting private key: %s', str(e))
+        return jsonify({'error': 'Nie udało się odszyfrować klucza prywatnego.'}), 500
+
+

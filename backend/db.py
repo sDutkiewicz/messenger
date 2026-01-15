@@ -83,18 +83,32 @@ def add_example_users():
     db = sqlite3.connect(DATABASE)
     cursor = db.cursor()
     from argon2 import PasswordHasher
+    from auth import generate_rsa_keypair, encrypt_private_key
     ph = PasswordHasher()
+    
     users = [
-        ('alice', 'alice@example.com', ph.hash('TestHaslo123'), os.urandom(16), 'PUBKEY', 'PRIVKEY', 'TOTP'),
-        ('bob', 'bob@example.com', ph.hash('TestHaslo123'), os.urandom(16), 'PUBKEY', 'PRIVKEY', 'TOTP'),
-        ('carol', 'carol@example.com', ph.hash('TestHaslo123'), os.urandom(16), 'PUBKEY', 'PRIVKEY', 'TOTP'),
+        ('alice', 'alice@example.com', 'TestHaslo123'),
+        ('bob', 'bob@example.com', 'TestHaslo123'),
+        ('carol', 'carol@example.com', 'TestHaslo123'),
     ]
-    for u in users:
-        cursor.execute('SELECT 1 FROM users WHERE username = ?', (u[0],))
+    
+    for username, email, password in users:
+        cursor.execute('SELECT 1 FROM users WHERE username = ?', (username,))
         if cursor.fetchone() is None:
+            password_hash = ph.hash(password)
+            salt = os.urandom(16)
+            
+            # Generate RSA keys
+            public_key, private_key = generate_rsa_keypair()
+            private_key_encrypted = encrypt_private_key(private_key, password, salt)
+            
+            # TOTP secret (2FA)
+            import pyotp
+            totp_secret = pyotp.random_base32()
+            
             cursor.execute(
                 'INSERT INTO users (username, email, password_hash, salt, public_key, private_key_encrypted, totp_secret) VALUES (?, ?, ?, ?, ?, ?, ?)',
-                u
+                (username, email, password_hash, salt, public_key, private_key_encrypted, totp_secret)
             )
     db.commit()
     db.close()
