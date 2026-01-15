@@ -3,6 +3,14 @@ from db import get_db
 from flask import session
 from sanitize import clean_input
 import io
+from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+import base64
+import hashlib
+import os
 
 
 # Blueprint for message-related routes
@@ -15,6 +23,114 @@ def get_current_user_id(): # return logged-in user ID from session
         # For demo: return 1 (alice) if not logged in
         return 1
     return user_id
+
+
+def decrypt_private_key(encrypted_key_str, password, salt):
+    """Decrypt private key using password-derived key"""
+    try:
+        kdf = PBKDF2HMAC(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=salt,
+            iterations=100000,
+            backend=default_backend()
+        )
+        key = base64.urlsafe_b64encode(kdf.derive(password.encode()))
+        cipher = Fernet(key)
+        decrypted = cipher.decrypt(encrypted_key_str.encode())
+        return decrypted.decode('utf-8')
+    except Exception:
+        return None
+
+
+def get_user_private_key(user_id, password):
+    """Get decrypted private key for user"""
+    db = get_db()
+    user = db.execute('SELECT * FROM users WHERE id = ?', (user_id,)).fetchone()
+    
+    if not user:
+        return None
+    
+    try:
+        private_key_pem = decrypt_private_key(user['private_key_encrypted'], password, user['salt'])
+        if private_key_pem:
+            from cryptography.hazmat.primitives.serialization import load_pem_private_key
+            private_key = load_pem_private_key(
+                private_key_pem.encode(),
+                password=None,
+                backend=default_backend()
+            )
+            return private_key
+    except Exception:
+        pass
+    
+    return None
+
+
+def get_user_public_key(user_id):
+    """Get public key for user"""
+    db = get_db()
+    user = db.execute('SELECT public_key FROM users WHERE id = ?', (user_id,)).fetchone()
+    
+    if not user or not user['public_key']:
+        return None
+    
+    try:
+        from cryptography.hazmat.primitives.serialization import load_pem_public_key
+        public_key = load_pem_public_key(
+            user['public_key'].encode(),
+            backend=default_backend()
+        )
+        return public_key
+    except Exception:
+        pass
+    
+    return None
+
+
+def encrypt_message(plaintext, aes_key):
+    """Encrypt message with AES (Fernet)"""
+    try:
+        cipher = Fernet(aes_key)
+        encrypted = cipher.encrypt(plaintext.encode())
+        return encrypted.decode('utf-8')
+    except Exception:
+        return None
+
+
+def sign_message(plaintext, private_key):
+    """Sign message with RSA private key"""
+    try:
+        message_hash = hashlib.sha256(plaintext.encode()).digest()
+        signature = private_key.sign(
+            message_hash,
+            padding.PSS(
+                mgf=padding.MGF1(hashes.SHA256()),
+                salt_length=padding.PSS.MAX_LENGTH
+            ),
+            hashes.SHA256()
+        )
+        return base64.b64encode(signature).decode('utf-8')
+    except Exception:
+        return None
+
+
+def encrypt_aes_key(aes_key_b64, public_key):
+    """Encrypt AES key with RSA public key"""
+    try:
+        aes_key_bytes = base64.urlsafe_b64decode(aes_key_b64)
+        encrypted_key = public_key.encrypt(
+            aes_key_bytes,
+            padding.OAEP(
+                mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                algorithm=hashes.SHA256(),
+                label=None
+            )
+        )
+        return base64.b64encode(encrypted_key).decode('utf-8')
+    except Exception:
+        return None
+
 
 @messages_bp.route('/api/users', methods=['GET']) # show list of users
 def list_users():
@@ -56,7 +172,7 @@ def get_conversation(user_id):
 
     # fetch messages between me and the other user
     messages = db.execute('''
-        SELECT m.id, m.sender_id, m.recipient_id, m.encrypted_content as content, m.is_read, u.username as sender
+        SELECT m.id, m.sender_id, m.recipient_id, m.encrypted_content, m.session_key_encrypted, m.signature, m.is_read, u.username as sender
         FROM messages m
         JOIN users u ON m.sender_id = u.id
         WHERE (m.sender_id = ? AND m.recipient_id = ?)
@@ -78,14 +194,17 @@ def get_conversation(user_id):
             except Exception:
                 pass
             attachments.append({'id': a['id'], 'filename': fname})
-        # sanitize outgoing content
-        content_out = m['content']
-        try:
-            if content_out:
-                content_out = clean_input(content_out)
-        except Exception:
-            pass
-        result.append({'id': m['id'], 'sender': m['sender'], 'sender_id': m['sender_id'], 'content': content_out, 'is_read': m['is_read'], 'attachments': attachments})
+        # Return encrypted content as-is (don't sanitize encrypted data)
+        result.append({
+            'id': m['id'], 
+            'sender': m['sender'], 
+            'sender_id': m['sender_id'], 
+            'encrypted_content': m['encrypted_content'],
+            'session_key_encrypted': m['session_key_encrypted'],
+            'signature': m['signature'],
+            'is_read': m['is_read'], 
+            'attachments': attachments
+        })
     return jsonify({'messages': result})
 
 
@@ -101,33 +220,33 @@ def send_message():
         # Support both JSON and multipart/form-data (for attachments)
         if request.content_type and request.content_type.startswith('multipart/form-data'):
             recipient_id = request.form.get('recipient_id')
-            content = (request.form.get('content') or '').strip()
-            try:
-                if content:
-                    content = clean_input(content)
-            except Exception:
-                pass
+            encrypted_content = request.form.get('encrypted_content')
+            session_key_encrypted = request.form.get('session_key_encrypted')
+            signature = request.form.get('signature', '')
         else:
             data = request.get_json() or {}
             recipient_id = data.get('recipient_id')
-            content = (data.get('content') or '').strip()
-            try:
-                if content:
-                    content = clean_input(content)
-            except Exception:
-                pass
+            encrypted_content = data.get('encrypted_content')
+            session_key_encrypted = data.get('session_key_encrypted')
+            signature = data.get('signature', '')
 
-        if not recipient_id or not content:
-            return jsonify({'error': 'Brak odbiorcy lub treści.'}), 400
+        if not recipient_id or not encrypted_content or not session_key_encrypted:
+            return jsonify({'error': 'Brak wymaganych pól szyfrowanej wiadomości.'}), 400
         
         try:
             recipient_id = int(recipient_id)
         except (ValueError, TypeError):
             return jsonify({'error': 'Nieprawidłowy odbiorca.'}), 400
 
+        # Verify recipient exists
+        recipient = db.execute('SELECT id FROM users WHERE id = ?', (recipient_id,)).fetchone()
+        if not recipient:
+            return jsonify({'error': 'Odbiorca nie istnieje.'}), 400
+
+        # Insert message into database (already encrypted from frontend)
         cur = db.execute(
             'INSERT INTO messages (sender_id, recipient_id, encrypted_content, session_key_encrypted, signature) VALUES (?, ?, ?, ?, ?)',
-            (my_id, recipient_id, content, '', '')
+            (my_id, recipient_id, encrypted_content, session_key_encrypted, signature)
         )
         msg_id = cur.lastrowid
         db.commit()
@@ -156,6 +275,20 @@ def send_message():
 
 
 # Delete a message
+
+# Get public key for a user
+@messages_bp.route('/api/users/<int:user_id>/public-key', methods=['GET'])
+def get_user_public_key_route(user_id):
+    """Get public key for a user"""
+    db = get_db()
+    user = db.execute('SELECT public_key FROM users WHERE id = ?', (user_id,)).fetchone()
+    
+    if not user or not user['public_key']:
+        return jsonify({'error': 'Nie znaleziono klucza publicznego.'}), 404
+    
+    return jsonify({'public_key': user['public_key']}), 200
+
+
 @messages_bp.route('/api/messages/<int:msg_id>', methods=['DELETE'])
 def delete_message(msg_id):
     """Delete a message if requester is sender or recipient."""

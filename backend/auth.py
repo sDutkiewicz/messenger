@@ -4,9 +4,9 @@ from db import get_db
 from sanitize import clean_input
 from argon2 import PasswordHasher
 from cryptography.hazmat.primitives.asymmetric import rsa
-from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.fernet import Fernet
-from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.backends import default_backend
 import os
 import re
@@ -65,8 +65,8 @@ def generate_rsa_keypair():
 def encrypt_private_key(private_key_pem, password, salt):
     """Encrypt private key using password-derived key"""
     # Derive encryption key from password
-    kdf = PBKDF2(
-        algorithm=hashlib.sha256(),
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
         length=32,
         salt=salt,
         iterations=100000,
@@ -85,8 +85,8 @@ def decrypt_private_key(encrypted_key_str, password, salt):
     """Decrypt private key using password-derived key"""
     try:
         # Derive decryption key from password
-        kdf = PBKDF2(
-            algorithm=hashlib.sha256(),
+        kdf = PBKDF2HMAC(
+            algorithm=hashes.SHA256(),
             length=32,
             salt=salt,
             iterations=100000,
@@ -106,9 +106,14 @@ def decrypt_private_key(encrypted_key_str, password, salt):
 # ========== HELPER FUNCTIONS ==========
 
 def user_has_2fa_enabled(user):
-    """Check if user has 2FA configured"""
+    """Check if user has 2FA configured (skip for example users)"""
     if not user:
         return False
+    
+    # Example users (alice, bob, carol) skip 2FA for testing
+    if user['username'] in ('alice', 'bob', 'carol'):
+        return False
+    
     try:
         totp_secret = user['totp_secret']
         return totp_secret and totp_secret != 'TOTP_SECRET_PLACEHOLDER'
@@ -205,9 +210,9 @@ def complete_2fa_login(user):
     """Complete login after 2FA verification"""
     try:
         session.pop('pre_2fa_user_id', None)
+        session.pop('pre_2fa_password', None)
         session['user_id'] = user['id']
         session['2fa_verified'] = True
-        
         db = get_db()
         db.execute('UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE id = ?', (user['id'],))
         db.commit()
@@ -480,6 +485,7 @@ def _verify_2fa_login(code, db):
         return jsonify({'error': 'Weryfikacja 2FA nie powiodła się.'}), 401
 
     # Complete login
+    password = session.get('pre_2fa_password', '')
     return complete_2fa_login(user)
 
 
@@ -522,3 +528,15 @@ def get_private_key():
         return jsonify({'error': 'Nie udało się odszyfrować klucza prywatnego.'}), 500
 
 
+# ========== LOGOUT ==========
+
+@auth_bp.route('/api/logout', methods=['POST'])
+def logout():
+    try:
+        session.pop('user_id', None)
+        session.pop('pre_2fa_user_id', None)
+        session.pop('reg_pending', None)
+        session.pop('2fa_verified', None)
+    except Exception:
+        pass
+    return jsonify({'message': 'Wylogowano.'}), 200

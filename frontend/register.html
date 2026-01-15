@@ -84,10 +84,9 @@
             body: JSON.stringify({code})
         });
         if (res.ok) {
-            twofaMsg.textContent = '2FA skonfigurowane. Przekierowanie...';
+            twofaMsg.textContent = '2FA skonfigurowane. Możesz się zalogować.';
             twofaMsg.style.color = 'green';
-            localStorage.setItem('loggedIn', '1');
-            setTimeout(() => { window.location.href = 'dashboard.html'; }, 600);
+            setTimeout(() => { window.location.href = 'login.html'; }, 1000);
         } else {
             const err = await res.json();
             twofaMsg.textContent = err.error || 'Błąd weryfikacji 2FA';

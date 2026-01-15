@@ -32,9 +32,13 @@
         </div>
         </div>
     </div>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.1.1/crypto-js.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jsbn/1.1/jsbn.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jsencrypt/3.3.0/jsencrypt.min.js"></script>
     <script>
     let selectedUser = null;
     let myId = null;
+    let privateKeyDecrypted = null;  // Zapamiętany klucz prywatny
 
     async function fetchMyId() {
         const res = await fetch('/api/me', { credentials: 'same-origin' });
@@ -42,6 +46,134 @@
         myId = data.id;
         const nameEl = document.getElementById('meName');
         if (data && data.username) nameEl.textContent = data.username; else nameEl.textContent = '—';
+        
+        // Załaduj klucz prywatny z sessionStorage (został pobrana przy logowaniu)
+        privateKeyDecrypted = sessionStorage.getItem('privateKeyDecrypted');
+        if (!privateKeyDecrypted) {
+            alert('⚠️ Klucz prywatny nie jest dostępny. Proszę zalogować się ponownie.');
+            window.location.href = 'login.html';
+        }
+    }
+    
+    function generateAESKey() {
+        // Generuje losowy klucz AES-256 w Base64
+        return CryptoJS.lib.WordArray.random(32).toString(CryptoJS.enc.Base64);
+    }
+    
+    function encryptAES(plaintext, aesKeyB64) {
+        try {
+            const encrypted = CryptoJS.AES.encrypt(plaintext, CryptoJS.enc.Base64.parse(aesKeyB64), {
+                mode: CryptoJS.mode.ECB,
+                padding: CryptoJS.pad.Pkcs7
+            });
+            return encrypted.toString();
+        } catch (error) {
+            console.error('AES encryption error:', error);
+            return null;
+        }
+    }
+    
+    async function encryptAESKeyWithPublicKey(aesKeyB64, recipientPublicKeyPEM) {
+        try {
+            const encrypt = new JSEncrypt();
+            encrypt.setPublicKey(recipientPublicKeyPEM);
+            const encryptedKey = encrypt.encrypt(aesKeyB64);
+            return encryptedKey;
+        } catch (error) {
+            console.error('RSA encryption error:', error);
+            return null;
+        }
+    }
+    
+    async function signMessage(plaintext) {
+        try {
+            // Utwórz hash SHA-256
+            const hash = CryptoJS.SHA256(plaintext).toString();
+            
+            // Podpisz hash kluczem prywatnym za pomocą JSEncrypt
+            const sign = new JSEncrypt();
+            sign.setPrivateKey(privateKeyDecrypted);
+            const signature = sign.sign(hash, CryptoJS.SHA256, 'sha256');
+            
+            return signature || null;
+        } catch (error) {
+            console.error('Signing error:', error);
+            return null;
+        }
+    }
+    
+    async function decryptAESKey(encryptedAESKeyOrJson) {
+        try {
+            // Obsługuj zarówno nowy format (JSON) jak i stary format (string)
+            let encryptedAESKeyB64 = encryptedAESKeyOrJson;
+            
+            if (typeof encryptedAESKeyOrJson === 'string' && encryptedAESKeyOrJson.startsWith('{')) {
+                try {
+                    const data = JSON.parse(encryptedAESKeyOrJson);
+                    // Najpierw spróbuj odszyfrować z moim kluczem (dla wysłanych wiadomości)
+                    if (data.s) {
+                        const decrypt = new JSEncrypt();
+                        decrypt.setPrivateKey(privateKeyDecrypted);
+                        const aesKeyB64 = decrypt.decrypt(data.s);
+                        if (aesKeyB64) return aesKeyB64;
+                    }
+                    // Potem spróbuj z kluczem dla odbiorcy (dla otrzymanych wiadomości)
+                    if (data.r) {
+                        encryptedAESKeyB64 = data.r;
+                    }
+                } catch (e) {
+                    console.error('JSON parse error:', e);
+                }
+            }
+            
+            // Odszyfruj AES key używając klucza prywatnego
+            const decrypt = new JSEncrypt();
+            decrypt.setPrivateKey(privateKeyDecrypted);
+            const aesKeyB64 = decrypt.decrypt(encryptedAESKeyB64);
+            return aesKeyB64 || null;
+        } catch (error) {
+            console.error('AES key decryption error:', error);
+            return null;
+        }
+    }
+    
+    function decryptAES(encryptedContent, aesKeyB64) {
+        try {
+            const decrypted = CryptoJS.AES.decrypt(encryptedContent, CryptoJS.enc.Base64.parse(aesKeyB64), {
+                mode: CryptoJS.mode.ECB,
+                padding: CryptoJS.pad.Pkcs7
+            });
+            return decrypted.toString(CryptoJS.enc.Utf8);
+        } catch (error) {
+            console.error('AES decryption error:', error);
+            return null;
+        }
+    }
+    
+    async function getSenderPublicKey(senderId) {
+        try {
+            const res = await fetch(`/api/users/${senderId}/public-key`, {
+                credentials: 'same-origin'
+            });
+            if (!res.ok) return null;
+            const data = await res.json();
+            return data.public_key;
+        } catch (error) {
+            console.error('Error fetching sender public key:', error);
+            return null;
+        }
+    }
+    
+    async function verifySignature(plaintext, signature, senderPublicKeyPEM) {
+        try {
+            const hash = CryptoJS.SHA256(plaintext).toString();
+            const verify = new JSEncrypt();
+            verify.setPublicKey(senderPublicKeyPEM);
+            return verify.verify(hash, signature, CryptoJS.SHA256);
+        } catch (error) {
+            console.error('Signature verification error:', error);
+            return false;
+        }
     }
 
     document.getElementById('logoutBtn').onclick = async function() {
@@ -71,15 +203,64 @@
         const data = await res.json();
         const messagesDiv = document.getElementById('messages');
         messagesDiv.innerHTML = '';
-        data.messages.forEach(m => {
+        
+        for (const m of data.messages) {
             const wrapper = document.createElement('div');
             wrapper.className = 'message-item';
             const who = (m.sender_id === myId) ? 'Ty' : m.sender;
-            const textNode = document.createElement('span');
-            let text = `${who}: ${m.content}`;
+            
+            let text = '';
+            let isEncrypted = m.encrypted_content && m.session_key_encrypted;
+            
+            // Jeśli to wiadomość którą wysłałaś - mogę ją teraz odszyfrować (mam klucz)
             if (m.sender_id === myId) {
+                if (isEncrypted) {
+                    const aesKeyB64 = await decryptAESKey(m.session_key_encrypted);
+                    if (!aesKeyB64) {
+                        text = `${who}: [Błąd odszyfrowywania klucza wysłanej wiadomości]`;
+                    } else {
+                        const plaintext = decryptAES(m.encrypted_content, aesKeyB64);
+                        if (!plaintext) {
+                            text = `${who}: [Błąd odszyfrowywania wysłanej wiadomości]`;
+                        } else {
+                            text = `${who}: ${plaintext}`;
+                        }
+                    }
+                } else {
+                    text = `${who}: [Wiadomość wysłana]`;
+                }
                 text += m.is_read ? ' ✓ Odczytane' : ' ☐ Wysłane';
+            } else {
+                // Jeśli to wiadomość którą otrzymałaś - odszyfruj
+                if (isEncrypted) {
+                    const aesKeyB64 = await decryptAESKey(m.session_key_encrypted);
+                    if (!aesKeyB64) {
+                        text = `${who}: [Błąd odszyfrowywania klucza]`;
+                    } else {
+                        const plaintext = decryptAES(m.encrypted_content, aesKeyB64);
+                        if (!plaintext) {
+                            text = `${who}: [Błąd odszyfrowywania wiadomości]`;
+                        } else {
+                            // Weryfikuj podpis jeśli dostępny
+                            let signatureValid = false;
+                            if (m.signature) {
+                                const senderPublicKey = await getSenderPublicKey(m.sender_id);
+                                if (senderPublicKey) {
+                                    signatureValid = await verifySignature(plaintext, m.signature, senderPublicKey);
+                                }
+                            }
+                            text = `${who}: ${plaintext}`;
+                            if (signatureValid) {
+                                text += ' ✓';
+                            }
+                        }
+                    }
+                } else {
+                    text = `${who}: [Niezaszyfrowana wiadomość]`;
+                }
             }
+            
+            const textNode = document.createElement('span');
             textNode.textContent = text;
             wrapper.appendChild(textNode);
 
@@ -117,7 +298,7 @@
             }
 
             messagesDiv.appendChild(wrapper);
-        });
+        }
         messagesDiv.scrollTop = messagesDiv.scrollHeight;
     }
 
@@ -213,17 +394,81 @@
     document.getElementById('sendForm').onsubmit = async function(e) {
         e.preventDefault();
         if (!selectedUser) return;
-        const msg = document.getElementById('msgInput').value;
-        const fileInput = document.getElementById('fileInput');
-        const form = new FormData();
-        form.append('recipient_id', selectedUser.id);
-        form.append('content', msg);
-        if (fileInput && fileInput.files.length) {
-            for (let i = 0; i < fileInput.files.length; i++) {
-                form.append('attachments', fileInput.files[i]);
-            }
+        if (!privateKeyDecrypted) {
+            alert('Klucz prywatny nie jest załadowany!');
+            return;
         }
+        
+        const msg = document.getElementById('msgInput').value;
+        
+        // Pobierz klucz publiczny odbiorcy
         try {
+            const keyRes = await fetch(`/api/users/${selectedUser.id}/public-key`, {
+                credentials: 'same-origin'
+            });
+            const keyData = await keyRes.json();
+            if (!keyRes.ok) {
+                alert('Błąd: ' + (keyData.error || 'Nie znaleziono klucza publicznego'));
+                return;
+            }
+            
+            // Generuj losowy klucz AES
+            const aesKeyB64 = generateAESKey();
+            
+            // Szyfruj wiadomość
+            const encryptedContent = encryptAES(msg, aesKeyB64);
+            if (!encryptedContent) {
+                alert('Błąd szyfrowania wiadomości');
+                return;
+            }
+            
+            // Szyfruj klucz AES kluczem publicznym odbiorcy
+            const encryptedAESKey_recipient = await encryptAESKeyWithPublicKey(aesKeyB64, keyData.public_key);
+            if (!encryptedAESKey_recipient) {
+                alert('Błąd szyfrowania klucza dla odbiorcy');
+                return;
+            }
+            
+            // Również szyfruj klucz AES kluczem publicznym NADAWCY (aby mógł wyświetlić swoją wiadomość)
+            // Pobierz mój klucz publiczny
+            const myKeyRes = await fetch(`/api/users/${myId}/public-key`, {
+                credentials: 'same-origin'
+            });
+            const myKeyData = await myKeyRes.json();
+            let encryptedAESKey_sender = null;
+            if (myKeyRes.ok) {
+                encryptedAESKey_sender = await encryptAESKeyWithPublicKey(aesKeyB64, myKeyData.public_key);
+            }
+            
+            // Podpisz wiadomość
+            const signature = await signMessage(msg);
+            if (!signature) {
+                alert('Błąd podpisywania wiadomości');
+                return;
+            }
+            
+            // Zapamiętaj AES key dla siebie (do wyświetlenia swojej wiadomości)
+            // Przechowuj w formacie: {r: "...", s: "...", k: "..."} gdzie k to oryginalny klucz
+            const sessionKeyData = {
+                r: encryptedAESKey_recipient,  // dla odbiorcy
+                s: encryptedAESKey_sender,      // dla nadawcy
+                k: aesKeyB64                    // oryginalny klucz (dla testów/debug)
+            };
+            
+            // Wyślij zaszyfrowaną wiadomość
+            const fileInput = document.getElementById('fileInput');
+            const form = new FormData();
+            form.append('recipient_id', selectedUser.id);
+            form.append('encrypted_content', encryptedContent);
+            form.append('session_key_encrypted', JSON.stringify(sessionKeyData));
+            form.append('signature', signature);
+            
+            if (fileInput && fileInput.files.length) {
+                for (let i = 0; i < fileInput.files.length; i++) {
+                    form.append('attachments', fileInput.files[i]);
+                }
+            }
+            
             const response = await fetch('/api/messages/send', {
                 method: 'POST',
                 body: form,
@@ -239,7 +484,7 @@
             document.getElementById('attachmentsList').innerHTML = '';
             fetchMessages(selectedUser.id);
         } catch (error) {
-            alert('Błąd wysyłania: ' + error.message);
+            alert('Błąd: ' + error.message);
         }
     };
 
