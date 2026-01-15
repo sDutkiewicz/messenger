@@ -28,6 +28,135 @@ def is_strong_password(password):
         return False
     return True
 
+
+# ========== HELPER FUNCTIONS ==========
+
+def user_has_2fa_enabled(user):
+    """Check if user has 2FA configured"""
+    if not user:
+        return False
+    try:
+        totp_secret = user['totp_secret']
+        return totp_secret and totp_secret != 'TOTP_SECRET_PLACEHOLDER'
+    except Exception:
+        return False
+
+
+def verify_totp_code(totp_secret, code):
+    """Verify TOTP code against secret"""
+    try:
+        totp = pyotp.TOTP(totp_secret)
+        return totp.verify(code, valid_window=1)
+    except Exception:
+        return False
+
+
+def record_login_attempt(username, success):
+    """Log login attempt to database"""
+    try:
+        db = get_db()
+        db.execute('INSERT INTO login_attempts (username, success) VALUES (?, ?)', (username, success))
+        db.commit()
+    except Exception:
+        pass
+
+
+def apply_failed_attempt_delay(failed_count):
+    """Apply progressive delay on failed login attempts"""
+    backoff = min(2.0, 0.25 * (failed_count + 1))
+    time.sleep(backoff)
+
+
+def get_recent_failed_attempts(username):
+    """Get count of recent failed login attempts"""
+    try:
+        db = get_db()
+        MAX_FAILED = 5
+        WINDOW = "-15 minutes"
+        
+        cur = db.execute(
+            "SELECT COUNT(*) as c FROM login_attempts WHERE username = ? AND success = 0 AND timestamp > datetime('now', ?)",
+            (username, WINDOW)
+        ).fetchone()
+        
+        return cur['c'] if cur is not None else 0
+    except Exception:
+        return 0
+
+
+def check_rate_limit(username):
+    """Check if user has exceeded login attempt limit"""
+    failed_count = get_recent_failed_attempts(username)
+    MAX_FAILED = 5
+    
+    if failed_count >= MAX_FAILED:
+        resp = make_response(jsonify({'error': 'Zbyt wiele nieudanych prób logowania. Spróbuj później.'}), 429)
+        resp.headers['Retry-After'] = str(15 * 60)
+        return resp, failed_count
+    
+    return None, failed_count
+
+
+def verify_password(user, password):
+    """Verify password against hash"""
+    if not user:
+        return False
+    try:
+        ph.verify(user['password_hash'], password)
+        return True
+    except Exception:
+        return False
+
+
+def login_without_2fa(user):
+    """Complete login for user without 2FA"""
+    try:
+        session['user_id'] = user['id']
+        db = get_db()
+        db.execute('UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE id = ?', (user['id'],))
+        db.commit()
+    except Exception:
+        pass
+    
+    return jsonify({'message': 'Zalogowano pomyślnie.', 'id': user['id']}), 200
+
+
+def login_with_2fa_required(user):
+    """Require 2FA verification for user"""
+    session['pre_2fa_user_id'] = user['id']
+    return jsonify({'message': 'Wymagana weryfikacja 2FA.', '2fa_required': True}), 200
+
+
+def complete_2fa_login(user):
+    """Complete login after 2FA verification"""
+    try:
+        session.pop('pre_2fa_user_id', None)
+        session['user_id'] = user['id']
+        session['2fa_verified'] = True
+        
+        db = get_db()
+        db.execute('UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE id = ?', (user['id'],))
+        db.commit()
+        
+        # Cleanup temporary QR files
+        try:
+            qr_dir = os.path.join(os.path.dirname(__file__), 'static', 'qrs')
+            pattern = os.path.join(qr_dir, f"{user['id']}_*.png")
+            for p in glob.glob(pattern):
+                try:
+                    os.remove(p)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    except Exception:
+        pass
+    
+    return jsonify({'message': 'Weryfikacja 2FA zakończona pomyślnie.', 'id': user['id']}), 200
+
+
+# ========== REGISTRATION ==========
+
 @auth_bp.route('/api/register', methods=['POST'])
 def register():
     data = request.get_json()
@@ -115,84 +244,49 @@ def register():
         return jsonify({'error': 'Rejestracja nie powiodła się.'}), 500
     return jsonify({'message': 'Rejestracja przygotowana. Dokończ konfigurację 2FA.', 'provisioning_uri': provisioning_uri, 'provisioning_qr': provisioning_qr, 'provisioning_qr_path': provisioning_qr_path, 'totp_secret': totp_secret}), 201
 
+
+# ========== LOGIN ==========
+
 @auth_bp.route('/api/login', methods=['POST'])
 def login():
     data = request.get_json()
     username = clean_input(data.get('username', '').strip())
     password = data.get('password', '')
+    
     if not username or not password:
-       
         return jsonify({'error': 'Nieprawidłowe dane logowania.'}), 401
+    
+    # Check rate limit
+    rate_limit_error, failed_count = check_rate_limit(username)
+    if rate_limit_error:
+        return rate_limit_error
+    
     db = get_db()
-
-    # rate limiting / anti-brute-force: count recent failed attempts for this username
-    MAX_FAILED = 5
-    WINDOW = "-15 minutes"
-
-    cur = db.execute(
-        "SELECT COUNT(*) as c FROM login_attempts WHERE username = ? AND success = 0 AND timestamp > datetime('now', ?)",
-        (username, WINDOW)
-    ).fetchone()
-
-    failed_count = cur['c'] if cur is not None else 0
-    if failed_count >= MAX_FAILED:
-        resp = make_response(jsonify({'error': 'Zbyt wiele nieudanych prób logowania. Spróbuj później.'}), 429)
-        # advise client when to retry (basic)
-        resp.headers['Retry-After'] = str(15 * 60)
-        return resp
-
+    
+    # Find user
     user = db.execute(
         'SELECT * FROM users WHERE username = ? OR email = ?', (username, username)
     ).fetchone()
-
-    success = 0
     
-    # verify password if user found
-    if user:
-        try:
-            ph.verify(user['password_hash'], password)
-            success = 1
-        except Exception:
-            success = 0
-    else:
-        # user not found, treat as failed attempt
-        success = 0
-
-    # record the password verification attempt (do not indicate existence)
-    try:
-        db.execute('INSERT INTO login_attempts (username, success) VALUES (?, ?)', (username, success))
-        db.commit()
-    except Exception:
-        pass
-
-    # apply small progressive delay on failures to slow brute-force
-    if not success:
-        backoff = min(2.0, 0.25 * (failed_count + 1))
-        time.sleep(backoff)
+    # Verify password
+    password_valid = verify_password(user, password)
+    
+    if not password_valid:
+        record_login_attempt(username, 0)
+        apply_failed_attempt_delay(failed_count)
         return jsonify({'error': 'Nieprawidłowe dane logowania.'}), 401
-
-    # if user has TOTP configured, require 2FA verification step
-    try:
-        user_totp = user['totp_secret'] if user else None
-    except Exception:
-        user_totp = None
-
-    # check if TOTP is set up (not placeholder)
-    if user and user_totp and user_totp != 'TOTP_SECRET_PLACEHOLDER':
-        # set pre-auth session and ask client to verify 2FA
-        session['pre_2fa_user_id'] = user['id']
-        return jsonify({'message': 'Wymagana weryfikacja 2FA.', '2fa_required': True}), 200
-
-    # successful login without 2FA (for example users without 2FA configured)
-    session['user_id'] = user['id']
-    try:
-        db.execute('UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE id = ?', (user['id'],))
-        db.commit()
-    except Exception:
-        pass
-    return jsonify({'message': 'Zalogowano pomyślnie.', 'id': user['id']}), 200
+    
+    # Password valid
+    record_login_attempt(username, 1)
+    
+    # Check if user has 2FA enabled
+    if user_has_2fa_enabled(user):
+        return login_with_2fa_required(user)
+    else:
+        return login_without_2fa(user)
 
 
+# ========== 2FA VERIFICATION ==========
 
 @auth_bp.route('/api/verify-2fa', methods=['POST'])
 def verify_2fa():
@@ -200,149 +294,113 @@ def verify_2fa():
     code = str(data.get('code', '')).strip()
     db = get_db()
 
-    # Case A: finishing pending registration stored in session
-    reg = session.get('reg_pending')
-    if reg is not None:
-        if not code:
-            return jsonify({'error': 'Weryfikacja 2FA nie powiodła się.'}), 401
-        totp_secret = reg.get('totp_secret')
-        if not totp_secret:
-            return jsonify({'error': 'Weryfikacja 2FA nie powiodła się.'}), 401
-        try:
-            totp = pyotp.TOTP(totp_secret)
-            ok = totp.verify(code, valid_window=1)
-        except Exception:
-            ok = False
-
-        # log attempt (username may be present)
-        try:
-            db.execute('INSERT INTO login_attempts (username, success) VALUES (?, ?)', (reg.get('username'), 1 if ok else 0))
-            db.commit()
-        except Exception:
-            pass
-
-        if not ok:
-            time.sleep(0.5)
-            return jsonify({'error': 'Weryfikacja 2FA nie powiodła się.'}), 401
-
-        # attempt to insert user into DB now
-        try:
-            salt_bytes = base64.b64decode(reg.get('salt_b64')) if reg.get('salt_b64') else os.urandom(16)
-            cur = db.execute(
-                'INSERT INTO users (username, email, password_hash, salt, public_key, private_key_encrypted, totp_secret) VALUES (?, ?, ?, ?, ?, ?, ?)',
-                (reg.get('username'), reg.get('email'), reg.get('password_hash'), salt_bytes, reg.get('public_key'), reg.get('private_key_encrypted'), reg.get('totp_secret'))
-            )
-            db.commit()
-            new_id = cur.lastrowid
-
-
-        except sqlite3.IntegrityError as e:
-            # specific conflict messages
-            m = str(e)
-            try:
-                if 'users.username' in m:
-                    return jsonify({'error': 'Nazwa użytkownika już istnieje.'}), 409
-                if 'users.email' in m:
-                    return jsonify({'error': 'Email już istnieje.'}), 409
-            except Exception:
-                pass
-            return jsonify({'error': 'Rejestracja nie powiodła się.'}), 409
-        except Exception:
-            return jsonify({'error': 'Rejestracja nie powiodła się.'}), 500
-
-        # finalize session
-        session.pop('reg_pending', None)
-        session['user_id'] = new_id
-        session['2fa_verified'] = True
-
-        # cleanup QR file if saved
-        try:
-            qr_path = reg.get('provisioning_qr_path')
-            if qr_path and qr_path.startswith('/static/qrs/'):
-                fs_path = os.path.join(os.path.dirname(__file__), qr_path.lstrip('/'))
-                if os.path.exists(fs_path):
-                    try:
-                        os.remove(fs_path)
-                    except Exception:
-                        pass
-        except Exception:
-            pass
-
-        return jsonify({'message': 'Rejestracja zakończona pomyślnie.', 'id': new_id}), 201
-
+    # Case A: finishing pending registration
+    if session.get('reg_pending') is not None:
+        return _verify_2fa_registration(code, db)
+    
     # Case B: existing user finishing login 2FA
-    pre_id = session.get('pre_2fa_user_id')
-    if not pre_id or not code:
-        # generic error (don't reveal reason)
+    if session.get('pre_2fa_user_id') is not None:
+        return _verify_2fa_login(code, db)
+    
+    # No valid session state
+    return jsonify({'error': 'Weryfikacja 2FA nie powiodła się.'}), 401
+
+
+def _verify_2fa_registration(code, db):
+    """Handle 2FA verification during registration"""
+    reg = session.get('reg_pending')
+    
+    if not code:
         return jsonify({'error': 'Weryfikacja 2FA nie powiodła się.'}), 401
-    user = db.execute('SELECT * FROM users WHERE id = ?', (pre_id,)).fetchone()
-    if not user:
+    
+    totp_secret = reg.get('totp_secret')
+    if not totp_secret:
         return jsonify({'error': 'Weryfikacja 2FA nie powiodła się.'}), 401
-
-    try:
-        totp_secret = user['totp_secret'] # may raise Exception
-    except Exception:
-        totp_secret = None
-
-
-    # not revealing whether TOTP is configured
-    if not totp_secret or totp_secret == 'TOTP_SECRET_PLACEHOLDER': 
-        # record failed attempt
-        try:
-            db.execute('INSERT INTO login_attempts (username, success) VALUES (?, ?)', (user['username'], 0))
-            db.commit()
-        except Exception:
-            pass
-        return jsonify({'error': 'Weryfikacja 2FA nie powiodła się.'}), 401
-
-    try:
-        totp = pyotp.TOTP(totp_secret)
-        ok = totp.verify(code, valid_window=1)
-    except Exception:
-        ok = False
-
-    # log attempt
-    try:
-        db.execute('INSERT INTO login_attempts (username, success) VALUES (?, ?)', (user['username'], 1 if ok else 0))
-        db.commit()
-    except Exception:
-        pass
-
+    
+    # Verify TOTP code
+    ok = verify_totp_code(totp_secret, code)
+    record_login_attempt(reg.get('username'), 1 if ok else 0)
+    
     if not ok:
         time.sleep(0.5)
         return jsonify({'error': 'Weryfikacja 2FA nie powiodła się.'}), 401
 
-    # on success, finalize login: set user_id and remove pre-auth marker
-    session.pop('pre_2fa_user_id', None)
-    session['user_id'] = user['id']
-    session['2fa_verified'] = True
+    # Insert user into database
     try:
-        db.execute('UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE id = ?', (user['id'],))
+        salt_bytes = base64.b64decode(reg.get('salt_b64')) if reg.get('salt_b64') else os.urandom(16)
+        cur = db.execute(
+            'INSERT INTO users (username, email, password_hash, salt, public_key, private_key_encrypted, totp_secret) VALUES (?, ?, ?, ?, ?, ?, ?)',
+            (reg.get('username'), reg.get('email'), reg.get('password_hash'), salt_bytes, reg.get('public_key'), reg.get('private_key_encrypted'), reg.get('totp_secret'))
+        )
         db.commit()
+        new_id = cur.lastrowid
+
+    except sqlite3.IntegrityError as e:
+        m = str(e)
+        try:
+            if 'users.username' in m:
+                return jsonify({'error': 'Nazwa użytkownika już istnieje.'}), 409
+            if 'users.email' in m:
+                return jsonify({'error': 'Email już istnieje.'}), 409
+        except Exception:
+            pass
+        return jsonify({'error': 'Rejestracja nie powiodła się.'}), 409
     except Exception:
-        pass
-    # cleanup temporary QR files for this user (if any)
+        return jsonify({'error': 'Rejestracja nie powiodła się.'}), 500
+
+    # Finalize session
+    session.pop('reg_pending', None)
+    session['user_id'] = new_id
+    session['2fa_verified'] = True
+
+    # Cleanup QR file
     try:
-        qr_dir = os.path.join(os.path.dirname(__file__), 'static', 'qrs')
-        pattern = os.path.join(qr_dir, f"{user['id']}_*.png")
-        for p in glob.glob(pattern):
-            try:
-                os.remove(p)
-            except Exception:
-                pass
+        qr_path = reg.get('provisioning_qr_path')
+        if qr_path and qr_path.startswith('/static/qrs/'):
+            fs_path = os.path.join(os.path.dirname(__file__), qr_path.lstrip('/'))
+            if os.path.exists(fs_path):
+                try:
+                    os.remove(fs_path)
+                except Exception:
+                    pass
     except Exception:
         pass
 
-    return jsonify({'message': 'Weryfikacja 2FA zakończona pomyślnie.', 'id': user['id']}), 200
+    return jsonify({'message': 'Rejestracja zakończona pomyślnie.', 'id': new_id}), 201
 
 
-@auth_bp.route('/api/logout', methods=['POST'])
-def logout():
+def _verify_2fa_login(code, db):
+    """Handle 2FA verification during login"""
+    pre_id = session.get('pre_2fa_user_id')
+    
+    if not pre_id or not code:
+        return jsonify({'error': 'Weryfikacja 2FA nie powiodła się.'}), 401
+    
+    user = db.execute('SELECT * FROM users WHERE id = ?', (pre_id,)).fetchone()
+    if not user:
+        return jsonify({'error': 'Weryfikacja 2FA nie powiodła się.'}), 401
+
+    # Get TOTP secret
     try:
-        session.pop('user_id', None)
-        session.pop('pre_2fa_user_id', None)
-        session.pop('reg_pending', None)
-        session.pop('2fa_verified', None)
+        totp_secret = user['totp_secret']
     except Exception:
-        pass
-    return jsonify({'message': 'Wylogowano.'}), 200
+        totp_secret = None
+
+    # Verify TOTP is configured
+    if not totp_secret or totp_secret == 'TOTP_SECRET_PLACEHOLDER':
+        record_login_attempt(user['username'], 0)
+        return jsonify({'error': 'Weryfikacja 2FA nie powiodła się.'}), 401
+
+    # Verify TOTP code
+    ok = verify_totp_code(totp_secret, code)
+    record_login_attempt(user['username'], 1 if ok else 0)
+    
+    if not ok:
+        time.sleep(0.5)
+        return jsonify({'error': 'Weryfikacja 2FA nie powiodła się.'}), 401
+
+    # Complete login
+    return complete_2fa_login(user)
+
+
+# ========== LOGOUT ==========
