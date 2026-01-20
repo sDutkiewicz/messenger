@@ -316,5 +316,11 @@ def download_attachment(att_id):
     if not has_permission:
         return jsonify({'error': 'No permission'}), status_code
     
-    return send_file(io.BytesIO(att['encrypted_data']), download_name=att['filename'], as_attachment=True)
+    # Return encrypted file data as base64 (frontend will decrypt it)
+    encrypted_data_b64 = base64.b64encode(att['encrypted_data']).decode('utf-8')
+    return jsonify({
+        'id': att_id,
+        'filename': att['filename'],
+        'encrypted_data': encrypted_data_b64
+    }), 200
 

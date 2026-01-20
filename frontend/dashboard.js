@@ -124,6 +124,46 @@ function decryptAES(encryptedContent, aesKeyB64) {
     }
 }
 
+async function encryptFileBinary(fileData, aesKeyB64) {
+    // Encrypt file binary data using AES-256
+    // fileData is ArrayBuffer or Uint8Array
+    try {
+        // Convert ArrayBuffer to Base64 string for CryptoJS
+        const binaryString = String.fromCharCode.apply(null, new Uint8Array(fileData));
+        const base64Data = btoa(binaryString);
+        
+        // Encrypt the base64 string
+        const encrypted = CryptoJS.AES.encrypt(base64Data, CryptoJS.enc.Base64.parse(aesKeyB64), {
+            mode: CryptoJS.mode.ECB,
+            padding: CryptoJS.pad.Pkcs7
+        });
+        return encrypted.toString();
+    } catch (error) {
+        console.error('File encryption error:', error);
+        return null;
+    }
+}
+
+function decryptFileBinary(encryptedContent, aesKeyB64) {
+    // Decrypt file from encrypted base64 string
+    try {
+        const decrypted = CryptoJS.AES.decrypt(encryptedContent, CryptoJS.enc.Base64.parse(aesKeyB64), {
+            mode: CryptoJS.mode.ECB,
+            padding: CryptoJS.pad.Pkcs7
+        });
+        const base64Data = decrypted.toString(CryptoJS.enc.Utf8);
+        const binaryString = atob(base64Data);
+        const bytes = new Uint8Array(binaryString.length);
+        for (let i = 0; i < binaryString.length; i++) {
+            bytes[i] = binaryString.charCodeAt(i);
+        }
+        return bytes.buffer;
+    } catch (error) {
+        console.error('File decryption error:', error);
+        return null;
+    }
+}
+
 async function getSenderPublicKey(senderId) {
     try {
         const res = await fetch(`/api/users/${senderId}/public-key`, {
@@ -263,17 +303,69 @@ async function fetchMessages(userId) {
         textNode.textContent = text;
         wrapper.appendChild(textNode);
 
+        // Store AES key in wrapper dataset for attachment decryption
+        // Get AES key if message is encrypted (attachments are encrypted with same key)
+        if (isEncrypted) {
+            const aesKeyB64 = await decryptAESKey(m.session_key_encrypted);
+            if (aesKeyB64) {
+                wrapper.dataset.aesKey = aesKeyB64;
+            }
+        }
+
         if (m.attachments && m.attachments.length) {
             const attList = document.createElement('div');
             attList.style.marginTop = '6px';
             m.attachments.forEach(a => {
-                const aLink = document.createElement('a');
-                aLink.href = `/api/attachments/${a.id}`;
-                aLink.textContent = a.filename;
-                aLink.target = '_blank';
-                aLink.style.display = 'inline-block';
-                aLink.style.marginRight = '8px';
-                attList.appendChild(aLink);
+                const aBtn = document.createElement('button');
+                aBtn.textContent = a.filename;
+                aBtn.type = 'button';
+                aBtn.style.display = 'inline-block';
+                aBtn.style.marginRight = '8px';
+                aBtn.style.padding = '4px 8px';
+                aBtn.style.backgroundColor = '#007bff';
+                aBtn.style.color = 'white';
+                aBtn.style.border = 'none';
+                aBtn.style.borderRadius = '3px';
+                aBtn.style.cursor = 'pointer';
+                aBtn.onclick = async (e) => {
+                    e.preventDefault();
+                    try {
+                        const aesKey = wrapper.dataset.aesKey;
+                        if (!aesKey) {
+                            alert('Brak klucza deszyfrowania dla pliku');
+                            return;
+                        }
+                        
+                        // Fetch encrypted attachment data
+                        const attRes = await fetch(`/api/attachments/${a.id}`);
+                        if (!attRes.ok) {
+                            alert('Błąd pobierania pliku');
+                            return;
+                        }
+                        const attData = await attRes.json();
+                        
+                        // Decrypt file binary
+                        const fileBuffer = decryptFileBinary(attData.encrypted_data, aesKey);
+                        if (!fileBuffer) {
+                            alert('Błąd deszyfrowania pliku');
+                            return;
+                        }
+                        
+                        // Create blob and download
+                        const blob = new Blob([fileBuffer], { type: 'application/octet-stream' });
+                        const url = URL.createObjectURL(blob);
+                        const link = document.createElement('a');
+                        link.href = url;
+                        link.download = attData.filename;
+                        document.body.appendChild(link);
+                        link.click();
+                        document.body.removeChild(link);
+                        URL.revokeObjectURL(url);
+                    } catch (error) {
+                        alert('Błąd: ' + error.message);
+                    }
+                };
+                attList.appendChild(aBtn);
             });
             wrapper.appendChild(attList);
         }
@@ -514,9 +606,24 @@ document.getElementById('sendForm').onsubmit = async function(e) {
         form.append('session_key_encrypted', JSON.stringify(sessionKeyData));
         form.append('signature', signature);
         
+        // Encrypt and add attachments
         if (fileInput && fileInput.files.length) {
             for (let i = 0; i < fileInput.files.length; i++) {
-                form.append('attachments', fileInput.files[i]);
+                const file = fileInput.files[i];
+                try {
+                    const arrayBuffer = await file.arrayBuffer();
+                    const encryptedFileData = await encryptFileBinary(arrayBuffer, aesKeyB64);
+                    if (!encryptedFileData) {
+                        alert('Błąd szyfrowania pliku: ' + file.name);
+                        return;
+                    }
+                    // Create blob from encrypted data string
+                    const blob = new Blob([encryptedFileData], { type: 'application/octet-stream' });
+                    form.append('attachments', blob, file.name);
+                } catch (error) {
+                    alert('Błąd przetwarzania pliku: ' + file.name + ' - ' + error.message);
+                    return;
+                }
             }
         }
         
