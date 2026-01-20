@@ -12,3 +12,6 @@ Account lockout - Rate limiting jest ale czy stały lock po N prób?
 Audit logging - historia logowań (IP, czas, device)
 Secret key hardcoded - SECRET_KEY w app.py powinno być z env
 Error messages - sprawdzić czy nie wycieka zbyt dużo info
+
+
+czy usunac created_at kolumne
