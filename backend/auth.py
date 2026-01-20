@@ -236,6 +236,45 @@ def complete_2fa_login(user):
 
 # ========== REGISTRATION ==========
 
+def generate_totp_qr(totp_secret, email, username):
+    """Generate TOTP QR code and return as data URL + file path"""
+    try:
+        # Provisioning URI format: otpauth://totp/issuer:username?secret=...
+        # This is a standard format recognized by authenticator apps (Google Authenticator, Authy, etc.)
+        provisioning_uri = pyotp.TOTP(totp_secret).provisioning_uri(
+            name=email or username, 
+            issuer_name='Messenger'
+        )
+    except Exception:
+        return None, None, None
+    
+    try:
+        qr_img = qrcode.make(provisioning_uri)
+        
+        # Generate data URL for frontend
+        buf = io.BytesIO()
+        qr_img.save(buf, format='PNG')
+        buf.seek(0)
+        qr_b64 = base64.b64encode(buf.read()).decode('ascii')
+        provisioning_qr = f'data:image/png;base64,{qr_b64}'
+        
+        # Save temporary file
+        try:
+            qr_dir = os.path.join(os.path.dirname(__file__), 'static', 'qrs')
+            os.makedirs(qr_dir, exist_ok=True)
+            filename = f'reg_{int(time.time())}_{os.urandom(4).hex()}.png'
+            filepath = os.path.join(qr_dir, filename)
+            qr_img.save(filepath, format='PNG')
+            provisioning_qr_path = f'/static/qrs/{filename}'
+        except Exception:
+            provisioning_qr_path = None
+        
+        # returning uri, data url, and file path
+        return provisioning_uri, provisioning_qr, provisioning_qr_path
+    except Exception:
+        return None, None, None
+
+
 @auth_bp.route('/api/register', methods=['POST'])
 def register():
     data = request.get_json()
@@ -244,90 +283,58 @@ def register():
     email = clean_input(email)
     password = data.get('password', '')
 
+    # Validate input
     if not username or not email or not password:
         return jsonify({'error': 'Wszystkie pola są wymagane.'}), 400
     
-
     if len(username) < 3 or len(username) > 32 or not re.match(r'^[a-zA-Z0-9_.-]+$', username):
         return jsonify({'error': 'Nieprawidłowa nazwa użytkownika.'}), 400
     
-
     if not re.match(r'^\S+@\S+\.\S+$', email):
         return jsonify({'error': 'Nieprawidłowy email.'}), 400
-    
     
     if not is_strong_password(password):
         return jsonify({'error': 'Hasło musi mieć min. 12 znaków, dużą i małą literę oraz cyfrę.'}), 400
 
-    # Do not create user yet — keep registration pending until 2FA verified.
     try:
+        # Hash password and generate encryption keys
         password_hash = ph.hash(password)
-        
-        # Generate RSA key pair for message encryption
         public_key, private_key = generate_rsa_keypair()
-        
-        # Generate salt for key encryption
         salt = os.urandom(16)
-        
-        # Encrypt private key with password-derived key
         private_key_encrypted = encrypt_private_key(private_key, password, salt)
         
-        # generate TOTP secret for user enrollment
+        # Generate TOTP and QR code
         totp_secret = pyotp.random_base32()
-
-        # build provisioning URI for authenticator apps
-        try:
-            provisioning_uri = pyotp.TOTP(totp_secret).provisioning_uri(name=email or username, issuer_name='Messenger')
-            # generate QR PNG as data URL so frontend doesn't rely on external chart API
-            try:
-                qr_img = qrcode.make(provisioning_uri)
-                # create data URL
-                buf = io.BytesIO()
-                qr_img.save(buf, format='PNG')
-                buf.seek(0)
-                qr_b64 = base64.b64encode(buf.read()).decode('ascii')
-                provisioning_qr = f'data:image/png;base64,{qr_b64}'
-                # also save a temporary file on disk and provide a static URL
-                try:
-                    qr_dir = os.path.join(os.path.dirname(__file__), 'static', 'qrs') # ensure directory exists
-                    os.makedirs(qr_dir, exist_ok=True)
-
-                    filename = f'reg_{int(time.time())}_{os.urandom(4).hex()}.png' # unique filename
-                    filepath = os.path.join(qr_dir, filename)
-                    qr_img.save(filepath, format='PNG') # save file
-                    provisioning_qr_path = f'/static/qrs/{filename}'
-                except Exception:
-                    provisioning_qr_path = None
-            except Exception:
-                provisioning_qr = None
-                provisioning_qr_path = None
-        except Exception:
-            provisioning_uri = None
-            provisioning_qr = None
-
-        # store pending registration in session (must be JSON-serializable)
-        try:
-            session['reg_pending'] = {
-                'username': username,
-                'email': email,
-                'password_hash': password_hash,
-                'salt_b64': base64.b64encode(salt).decode('ascii'),
-                'public_key': public_key,
-                'private_key_encrypted': private_key_encrypted,
-                'totp_secret': totp_secret,
-                'provisioning_qr_path': provisioning_qr_path
-            }
-        except Exception:
-            # session may fail; fall back to returning QR data only
-            pass
+        provisioning_uri, provisioning_qr, provisioning_qr_path = generate_totp_qr(
+            totp_secret, email, username
+        )
+        
+        # Store in session
+        session['reg_pending'] = {
+            'username': username,
+            'email': email,
+            'password_hash': password_hash,
+            'salt_b64': base64.b64encode(salt).decode('ascii'),
+            'public_key': public_key,
+            'private_key_encrypted': private_key_encrypted,
+            'totp_secret': totp_secret,
+            'provisioning_qr_path': provisioning_qr_path
+        }
+        
+        return jsonify({
+            'message': 'Rejestracja przygotowana. Dokończ konfigurację 2FA.',
+            'provisioning_uri': provisioning_uri,
+            'provisioning_qr': provisioning_qr,
+            'provisioning_qr_path': provisioning_qr_path,
+            'totp_secret': totp_secret
+        }), 201
+    
     except Exception as e:
-        # Do not reveal whether username or email already exists. Log a short warning.
         try:
             current_app.logger.warning('Registration error: %s', str(e))
         except Exception:
             pass
         return jsonify({'error': 'Rejestracja nie powiodła się.'}), 500
-    return jsonify({'message': 'Rejestracja przygotowana. Dokończ konfigurację 2FA.', 'provisioning_uri': provisioning_uri, 'provisioning_qr': provisioning_qr, 'provisioning_qr_path': provisioning_qr_path, 'totp_secret': totp_secret}), 201
 
 
 # ========== LOGIN ==========
@@ -490,7 +497,6 @@ def _verify_2fa_login(code, db):
 
 
 # ========== PRIVATE KEY RETRIEVAL ==========
-
 @auth_bp.route('/api/get-private-key', methods=['POST'])
 def get_private_key():
     """Get decrypted private key for logged-in user"""

@@ -2,12 +2,12 @@ from flask import Blueprint, request, jsonify, send_file
 from db import get_db
 from flask import session
 from sanitize import clean_input
+from auth import decrypt_private_key
 import io
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.backends import default_backend
-from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 import base64
 import hashlib
 import os
@@ -17,7 +17,8 @@ import os
 messages_bp = Blueprint('messages', __name__)
 
 
-def get_current_user_id(): # return logged-in user ID from session
+def get_current_user_id():
+    """Return logged-in user ID from session"""
     user_id = session.get('user_id')
     if user_id is None:
         # For demo: return 1 (alice) if not logged in
@@ -25,22 +26,19 @@ def get_current_user_id(): # return logged-in user ID from session
     return user_id
 
 
-def decrypt_private_key(encrypted_key_str, password, salt):
-    """Decrypt private key using password-derived key"""
-    try:
-        kdf = PBKDF2HMAC(
-            algorithm=hashes.SHA256(),
-            length=32,
-            salt=salt,
-            iterations=100000,
-            backend=default_backend()
-        )
-        key = base64.urlsafe_b64encode(kdf.derive(password.encode()))
-        cipher = Fernet(key)
-        decrypted = cipher.decrypt(encrypted_key_str.encode())
-        return decrypted.decode('utf-8')
-    except Exception:
-        return None
+def check_message_permission(user_id, msg_id, db):
+    """Check if user has permission to access message (sender or recipient)"""
+    if user_id is None:
+        return False, {'error': 'Unauthorized'}, 401
+    
+    msg = db.execute('SELECT sender_id, recipient_id FROM messages WHERE id = ?', (msg_id,)).fetchone()
+    if not msg:
+        return False, {'error': 'Message not found'}, 404
+    
+    if user_id != msg['sender_id'] and user_id != msg['recipient_id']:
+        return False, {'error': 'No permission'}, 403
+    
+    return True, msg, 200
 
 
 def get_user_private_key(user_id, password):
@@ -294,45 +292,29 @@ def delete_message(msg_id):
     """Delete a message if requester is sender or recipient."""
     db = get_db()
     my_id = get_current_user_id()
-
-
-    if my_id is None:
-        return jsonify({'error': 'Non-authorized'}), 401
     
-
-    msg = db.execute('SELECT sender_id, recipient_id FROM messages WHERE id = ?', (msg_id,)).fetchone()
-    if not msg:
-        return jsonify({'error': 'Message not found.'}), 404
-    
-    if my_id != msg['sender_id'] and my_id != msg['recipient_id']:
-        return jsonify({'error': 'No permission.'}), 403
+    has_permission, result, status_code = check_message_permission(my_id, msg_id, db)
+    if not has_permission:
+        return jsonify(result), status_code
     
     db.execute('DELETE FROM messages WHERE id = ?', (msg_id,))
     db.commit()
-    return '', 204 # No Content
+    return '', 204
 
 
 
-# Download attachment
 @messages_bp.route('/api/attachments/<int:att_id>', methods=['GET'])
 def download_attachment(att_id):
     db = get_db()
     my_id = get_current_user_id()
-    if my_id is None:
-        return jsonify({'error': 'Non-authorized'}), 401
+    
     att = db.execute('SELECT message_id, filename, encrypted_data FROM attachments WHERE id = ?', (att_id,)).fetchone()
     if not att:
-        return jsonify({'error': 'Attachment not found.'}), 404
+        return jsonify({'error': 'Attachment not found'}), 404
     
-    # check permission: user must be sender or recipient of message
-    msg = db.execute('SELECT sender_id, recipient_id FROM messages WHERE id = ?', (att['message_id'],)).fetchone()
-    if not msg:
-        return jsonify({'error': 'Related message not found.'}), 404
-    if my_id != msg['sender_id'] and my_id != msg['recipient_id']:
-        return jsonify({'error': 'No permission.'}), 403
-    data = att['encrypted_data']
-    # return as attachment
-
+    has_permission, _, status_code = check_message_permission(my_id, att['message_id'], db)
+    if not has_permission:
+        return jsonify({'error': 'No permission'}), status_code
     
-    return send_file(io.BytesIO(data), download_name=att['filename'], as_attachment=True)
+    return send_file(io.BytesIO(att['encrypted_data']), download_name=att['filename'], as_attachment=True)
 
