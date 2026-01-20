@@ -87,13 +87,15 @@
     
     async function signMessage(plaintext) {
         try {
-            // Utwórz hash SHA-256
-            const hash = CryptoJS.SHA256(plaintext).toString();
+            if (!privateKeyDecrypted) {
+                console.error('Private key not available');
+                return null;
+            }
             
-            // Podpisz hash kluczem prywatnym za pomocą JSEncrypt
+            // Użyj JSEncrypt do podpisania - on sam robi hashing
             const sign = new JSEncrypt();
             sign.setPrivateKey(privateKeyDecrypted);
-            const signature = sign.sign(hash, CryptoJS.SHA256, 'sha256');
+            const signature = sign.sign(plaintext, CryptoJS.SHA256, 'sha256');
             
             return signature || null;
         } catch (error) {
@@ -166,10 +168,12 @@
     
     async function verifySignature(plaintext, signature, senderPublicKeyPEM) {
         try {
-            const hash = CryptoJS.SHA256(plaintext).toString();
+            // Użyj JSEncrypt do weryfikacji - on sam robi hashing
             const verify = new JSEncrypt();
             verify.setPublicKey(senderPublicKeyPEM);
-            return verify.verify(hash, signature, CryptoJS.SHA256);
+            const isValid = verify.verify(plaintext, signature, CryptoJS.SHA256);
+            
+            return isValid;
         } catch (error) {
             console.error('Signature verification error:', error);
             return false;
