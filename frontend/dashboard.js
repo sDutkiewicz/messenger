@@ -224,7 +224,7 @@ async function fetchMessages(userId) {
             } else {
                 text = `${who}: [Unencrypted message]`;
             }
-            text += m.is_read ? ' ✓ Read' : ' ☐ Sent';
+            text += m.is_read ? ' [Read]' : ' [Sent]';
         } else {
             // If this is a received message - decrypt it
             if (isEncrypted) {
@@ -246,7 +246,7 @@ async function fetchMessages(userId) {
                         }
                         text = `${who}: ${plaintext}`;
                         if (signatureValid) {
-                            text += ' ✓';
+                            text += ' [Verified]';
                         }
                         // Store data for verification in wrapper
                         wrapper.dataset.plaintext = plaintext;

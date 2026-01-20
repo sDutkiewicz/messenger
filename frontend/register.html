@@ -30,6 +30,12 @@
         <a href="login.html">Masz już konto? Zaloguj się</a>
     </div>
     <script>
+    function showMessage(elementId, text, color) {
+        const el = document.getElementById(elementId);
+        el.textContent = text;
+        el.style.color = color;
+    }
+    
     document.getElementById('registerForm').onsubmit = async function(e) {
         e.preventDefault();
         const form = e.target;
@@ -44,15 +50,16 @@
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify(data)
         });
-        const msg = document.getElementById('registerMsg');
+        
         if (res.ok) {
             const body = await res.json();
-            msg.textContent = 'Rejestracja udana! Dokończ konfigurację 2FA.';
-            msg.style.color = 'green';
+            showMessage('registerMsg', 'Rejestracja udana! Dokończ konfigurację 2FA.', 'green');
+            
             if (body.provisioning_qr || body.provisioning_uri || body.totp_secret) {
                 const twofa = document.getElementById('twofaSetup');
                 const qr = document.getElementById('provisionQr');
                 const secret = document.getElementById('totpSecret');
+                
                 if (body.provisioning_qr) {
                     qr.src = body.provisioning_qr;
                 } else if (body.provisioning_qr_path) {
@@ -68,29 +75,26 @@
             }
         } else {
             const err = await res.json();
-            msg.textContent = err.error || 'Błąd rejestracji';
-            msg.style.color = 'red';
+            showMessage('registerMsg', err.error || 'Błąd rejestracji', 'red');
         }
     };
 
     document.getElementById('verify2faForm').onsubmit = async function(e) {
         e.preventDefault();
         const code = e.target.code.value.trim();
-        const twofaMsg = document.getElementById('twofaMsg');
         const res = await fetch('/api/verify-2fa', {
             method: 'POST',
             credentials: 'same-origin',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({code})
         });
+        
         if (res.ok) {
-            twofaMsg.textContent = '2FA skonfigurowane. Możesz się zalogować.';
-            twofaMsg.style.color = 'green';
+            showMessage('twofaMsg', '2FA skonfigurowane. Możesz się zalogować.', 'green');
             setTimeout(() => { window.location.href = 'login.html'; }, 1000);
         } else {
             const err = await res.json();
-            twofaMsg.textContent = err.error || 'Błąd weryfikacji 2FA';
-            twofaMsg.style.color = 'red';
+            showMessage('twofaMsg', err.error || 'Błąd weryfikacji 2FA', 'red');
         }
     };
     </script>

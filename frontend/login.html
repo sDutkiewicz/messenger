@@ -26,6 +26,12 @@
         <a href="register.html">Nie masz konta? Zarejestruj się</a>
     </div>
     <script>
+    function showMessage(elementId, text, color) {
+        const el = document.getElementById(elementId);
+        el.textContent = text;
+        el.style.color = color;
+    }
+    
     async function fetchAndStorePrivateKey(password) {
         try {
             const res = await fetch('/api/get-private-key', {
@@ -36,7 +42,6 @@
             });
             const data = await res.json();
             if (res.ok) {
-                // Przechowuj klucz prywatny w sessionStorage na czas sesji
                 sessionStorage.setItem('privateKeyDecrypted', data.private_key);
                 return true;
             } else {
@@ -61,71 +66,58 @@
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify(data)
         });
-        const msg = document.getElementById('loginMsg');
         const body = await res.json().catch(() => ({}));
+        
         if (res.ok && body['2fa_required']) {
-            // Zapamiętaj hasło dla 2FA flow
             sessionStorage.setItem('_loginPassword', password);
-            msg.textContent = 'Wymagana weryfikacja 2FA.';
-            msg.style.color = 'orange';
+            showMessage('loginMsg', 'Wymagana weryfikacja 2FA.', 'orange');
             document.getElementById('twofaSection').style.display = 'block';
         } else if (res.ok) {
-            // Użyj tego samego hasła do odszyfrowania klucza prywatnego
             const keyLoaded = await fetchAndStorePrivateKey(password);
             if (keyLoaded) {
-                msg.textContent = '✓ Zalogowano!';
-                msg.style.color = 'green';
+                showMessage('loginMsg', 'Zalogowano!', 'green');
                 localStorage.setItem('loggedIn', '1');
                 setTimeout(() => { window.location.href = 'dashboard.html'; }, 500);
             } else {
-                msg.textContent = '⚠️ Zalogowano ale nie udało się załadować klucza prywatnego';
-                msg.style.color = 'orange';
-                // Mimo to przejdź do dashboard (klucz można spróbować załadować ponownie)
+                showMessage('loginMsg', 'Zalogowano ale nie udało się załadować klucza prywatnego', 'orange');
                 setTimeout(() => { window.location.href = 'dashboard.html'; }, 2000);
             }
         } else {
-            const err = body;
-            msg.textContent = err.error || 'Błąd logowania';
-            msg.style.color = 'red';
+            showMessage('loginMsg', body.error || 'Błąd logowania', 'red');
         }
     };
 
     document.getElementById('login2faForm').onsubmit = async function(e) {
         e.preventDefault();
         const code = e.target.code.value.trim();
-        const login2faMsg = document.getElementById('login2faMsg');
         const res = await fetch('/api/verify-2fa', {
             method: 'POST',
             credentials: 'same-origin',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({code})
         });
+        
         if (res.ok) {
-            // Pobierz hasło zapamiętane z pierwszego kroku logowania
             const password = sessionStorage.getItem('_loginPassword');
             if (password) {
                 const keyLoaded = await fetchAndStorePrivateKey(password);
                 if (keyLoaded) {
-                    login2faMsg.textContent = '✓ Weryfikacja 2FA powiodła się. Przekierowanie...';
-                    login2faMsg.style.color = 'green';
+                    showMessage('login2faMsg', 'Weryfikacja 2FA powiodła się. Przekierowanie...', 'green');
                     localStorage.setItem('loggedIn', '1');
                     sessionStorage.removeItem('_loginPassword');
                     setTimeout(() => { window.location.href = 'dashboard.html'; }, 600);
                 } else {
-                    login2faMsg.textContent = '⚠️ 2FA OK ale nie udało się załadować klucza';
-                    login2faMsg.style.color = 'orange';
+                    showMessage('login2faMsg', '2FA OK ale nie udało się załadować klucza', 'orange');
                     localStorage.setItem('loggedIn', '1');
                     sessionStorage.removeItem('_loginPassword');
                     setTimeout(() => { window.location.href = 'dashboard.html'; }, 1500);
                 }
             } else {
-                login2faMsg.textContent = 'Błąd: nie znaleziono hasła';
-                login2faMsg.style.color = 'red';
+                showMessage('login2faMsg', 'Błąd: nie znaleziono hasła', 'red');
             }
         } else {
             const err = await res.json().catch(() => ({}));
-            login2faMsg.textContent = err.error || 'Błąd weryfikacji 2FA';
-            login2faMsg.style.color = 'red';
+            showMessage('login2faMsg', err.error || 'Błąd weryfikacji 2FA', 'red');
         }
     };
     </script>
