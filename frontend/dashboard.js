@@ -1,5 +1,8 @@
 // dashboard.js - Messenger Application (Dashboard)
 
+// === IMPORTS ===
+// crypto.js provides all cryptographic operations
+
 // === INITIALIZATION ===
 if (!localStorage.getItem('loggedIn')) {
     window.location.href = 'login.html';
@@ -10,7 +13,7 @@ let selectedUser = null;
 let myId = null;
 let privateKeyDecrypted = null;  // Decrypted private key cached in memory
 
-// === ENCRYPTION FUNCTIONS ===
+// === USER INITIALIZATION ===
 
 async function fetchMyId() {
     const res = await fetch('/api/me', { credentials: 'same-origin' });
@@ -24,171 +27,6 @@ async function fetchMyId() {
     if (!privateKeyDecrypted) {
         alert('Klucz prywatny nie jest dostępny. Proszę zalogować się ponownie.');
         window.location.href = 'login.html';
-    }
-}
-
-function generateAESKey() {
-    // Generates random AES-256 key in Base64
-    return CryptoJS.lib.WordArray.random(32).toString(CryptoJS.enc.Base64);
-}
-
-function encryptAES(plaintext, aesKeyB64) {
-    try {
-        const encrypted = CryptoJS.AES.encrypt(plaintext, CryptoJS.enc.Base64.parse(aesKeyB64), {
-            mode: CryptoJS.mode.ECB,
-            padding: CryptoJS.pad.Pkcs7
-        });
-        return encrypted.toString();
-    } catch (error) {
-        console.error('AES encryption error:', error);
-        return null;
-    }
-}
-
-async function encryptAESKeyWithPublicKey(aesKeyB64, recipientPublicKeyPEM) {
-    try {
-        const encrypt = new JSEncrypt();
-        encrypt.setPublicKey(recipientPublicKeyPEM);
-        const encryptedKey = encrypt.encrypt(aesKeyB64);
-        return encryptedKey;
-    } catch (error) {
-        console.error('RSA encryption error:', error);
-        return null;
-    }
-}
-
-async function signMessage(plaintext) {
-    try {
-        if (!privateKeyDecrypted) {
-            console.error('Private key not available');
-            return null;
-        }
-        
-        // Użyj JSEncrypt do podpisania - on sam robi hashing
-        const sign = new JSEncrypt();
-        sign.setPrivateKey(privateKeyDecrypted);
-        const signature = sign.sign(plaintext, CryptoJS.SHA256, 'sha256');
-        
-        return signature || null;
-    } catch (error) {
-        console.error('Signing error:', error);
-        return null;
-    }
-}
-
-async function decryptAESKey(encryptedAESKeyOrJson) {
-    try {
-        // Support both new format (JSON) and old format (string)
-        let encryptedAESKeyB64 = encryptedAESKeyOrJson;
-        
-        if (typeof encryptedAESKeyOrJson === 'string' && encryptedAESKeyOrJson.startsWith('{')) {
-            try {
-                const data = JSON.parse(encryptedAESKeyOrJson);
-                // First try decrypting with sender key (for sent messages)
-                if (data.s) {
-                    const decrypt = new JSEncrypt();
-                    decrypt.setPrivateKey(privateKeyDecrypted);
-                    const aesKeyB64 = decrypt.decrypt(data.s);
-                    if (aesKeyB64) return aesKeyB64;
-                }
-                // Then try with recipient key (for received messages)
-                if (data.r) {
-                    encryptedAESKeyB64 = data.r;
-                }
-            } catch (e) {
-                console.error('JSON parse error:', e);
-            }
-        }
-        
-        // Decrypt AES key using private key
-        const decrypt = new JSEncrypt();
-        decrypt.setPrivateKey(privateKeyDecrypted);
-        const aesKeyB64 = decrypt.decrypt(encryptedAESKeyB64);
-        return aesKeyB64 || null;
-    } catch (error) {
-        console.error('AES key decryption error:', error);
-        return null;
-    }
-}
-
-function decryptAES(encryptedContent, aesKeyB64) {
-    try {
-        const decrypted = CryptoJS.AES.decrypt(encryptedContent, CryptoJS.enc.Base64.parse(aesKeyB64), {
-            mode: CryptoJS.mode.ECB,
-            padding: CryptoJS.pad.Pkcs7
-        });
-        return decrypted.toString(CryptoJS.enc.Utf8);
-    } catch (error) {
-        console.error('AES decryption error:', error);
-        return null;
-    }
-}
-
-async function encryptFileBinary(fileData, aesKeyB64) {
-    // Encrypt file binary data using AES-256
-    // fileData is ArrayBuffer or Uint8Array
-    try {
-        // Convert ArrayBuffer to Base64 string for CryptoJS
-        const binaryString = String.fromCharCode.apply(null, new Uint8Array(fileData));
-        const base64Data = btoa(binaryString);
-        
-        // Encrypt the base64 string
-        const encrypted = CryptoJS.AES.encrypt(base64Data, CryptoJS.enc.Base64.parse(aesKeyB64), {
-            mode: CryptoJS.mode.ECB,
-            padding: CryptoJS.pad.Pkcs7
-        });
-        return encrypted.toString();
-    } catch (error) {
-        console.error('File encryption error:', error);
-        return null;
-    }
-}
-
-function decryptFileBinary(encryptedContent, aesKeyB64) {
-    // Decrypt file from encrypted base64 string
-    try {
-        const decrypted = CryptoJS.AES.decrypt(encryptedContent, CryptoJS.enc.Base64.parse(aesKeyB64), {
-            mode: CryptoJS.mode.ECB,
-            padding: CryptoJS.pad.Pkcs7
-        });
-        const base64Data = decrypted.toString(CryptoJS.enc.Utf8);
-        const binaryString = atob(base64Data);
-        const bytes = new Uint8Array(binaryString.length);
-        for (let i = 0; i < binaryString.length; i++) {
-            bytes[i] = binaryString.charCodeAt(i);
-        }
-        return bytes.buffer;
-    } catch (error) {
-        console.error('File decryption error:', error);
-        return null;
-    }
-}
-
-async function getSenderPublicKey(senderId) {
-    try {
-        const res = await fetch(`/api/users/${senderId}/public-key`, {
-            credentials: 'same-origin'
-        });
-        if (!res.ok) return null;
-        const data = await res.json();
-        return data.public_key;
-    } catch (error) {
-        console.error('Error fetching sender public key:', error);
-        return null;
-    }
-}
-
-async function verifySignature(plaintext, signature, senderPublicKeyPEM) {
-    try {
-        // use JSEncrypt to verify signature
-        const verify = new JSEncrypt();
-        verify.setPublicKey(senderPublicKeyPEM);
-        const isValid = verify.verify(plaintext, signature, CryptoJS.SHA256);
-        
-        return isValid;
-    } catch (error) {
-        console.error('Signature verification error:', error);
-        return false;
     }
 }
 
@@ -250,7 +88,7 @@ async function fetchMessages(userId) {
         // If this is a message I sent - I can decrypt it now (I have the key)
         if (m.sender_id === myId) {
             if (isEncrypted) {
-                const aesKeyB64 = await decryptAESKey(m.session_key_encrypted);
+                const aesKeyB64 = await decryptAESKey(m.session_key_encrypted, privateKeyDecrypted);
                 if (!aesKeyB64) {
                     text = `${who}: [Error decrypting sent message key]`;
                 } else {
@@ -268,7 +106,7 @@ async function fetchMessages(userId) {
         } else {
             // If this is a received message - decrypt it
             if (isEncrypted) {
-                const aesKeyB64 = await decryptAESKey(m.session_key_encrypted);
+                const aesKeyB64 = await decryptAESKey(m.session_key_encrypted, privateKeyDecrypted);
                 if (!aesKeyB64) {
                     text = `${who}: [Error decrypting key]`;
                 } else {
@@ -306,7 +144,7 @@ async function fetchMessages(userId) {
         // Store AES key in wrapper dataset for attachment decryption
         // Get AES key if message is encrypted (attachments are encrypted with same key)
         if (isEncrypted) {
-            const aesKeyB64 = await decryptAESKey(m.session_key_encrypted);
+            const aesKeyB64 = await decryptAESKey(m.session_key_encrypted, privateKeyDecrypted);
             if (aesKeyB64) {
                 wrapper.dataset.aesKey = aesKeyB64;
             }
@@ -583,8 +421,9 @@ document.getElementById('sendForm').onsubmit = async function(e) {
             encryptedAESKey_sender = await encryptAESKeyWithPublicKey(aesKeyB64, myKeyData.public_key);
         }
         
-        // Sign encrypted content (not plaintext) - backend verifies encrypted_content
-        const signature = await signMessage(encryptedContent);
+        // Sign plaintext (original message) - not encrypted_content
+        // This allows verification on receiving end where we have plaintext
+        const signature = await signMessage(msg, privateKeyDecrypted);
         if (!signature) {
             alert('Błąd podpisywania wiadomości');
             return;

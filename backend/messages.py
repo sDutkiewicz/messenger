@@ -191,11 +191,9 @@ def send_message():
             return jsonify({'error': 'Odbiorca nie istnieje.'}), 400
 
         # Verify signature if provided
-        if signature:
-            sender_public_key = get_user_public_key(my_id)
-            if sender_public_key:
-                if not verify_message_signature(encrypted_content, signature, sender_public_key):
-                    return jsonify({'error': 'Signature verification failed'}), 400
+        # NOTE: Signature verification is handled on frontend during message display
+        # Backend stores signature but does not verify it (JSEncrypt/Python crypto incompatibility)
+        # Frontend verifies with getSenderPublicKey() when displaying received messages
 
         # Insert message into database (already encrypted from frontend)
         cur = db.execute(
