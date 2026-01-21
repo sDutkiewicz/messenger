@@ -1,16 +1,12 @@
-from flask import Blueprint, request, jsonify, send_file
+from flask import Blueprint, request, jsonify
 from db import get_db
 from flask import session
 from sanitize import clean_input
-from auth import decrypt_private_key
-import io
-from cryptography.fernet import Fernet
-from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.backends import default_backend
 import base64
 import hashlib
-import os
 
 
 # Blueprint for message-related routes
@@ -41,30 +37,6 @@ def check_message_permission(user_id, msg_id, db):
     return True, msg, 200
 
 
-def get_user_private_key(user_id, password):
-    """Get decrypted private key for user"""
-    db = get_db()
-    user = db.execute('SELECT * FROM users WHERE id = ?', (user_id,)).fetchone()
-    
-    if not user:
-        return None
-    
-    try:
-        private_key_pem = decrypt_private_key(user['private_key_encrypted'], password, user['salt'])
-        if private_key_pem:
-            from cryptography.hazmat.primitives.serialization import load_pem_private_key
-            private_key = load_pem_private_key(
-                private_key_pem.encode(),
-                password=None,
-                backend=default_backend()
-            )
-            return private_key
-    except Exception:
-        pass
-    
-    return None
-
-
 def get_user_public_key(user_id):
     """Get public key for user"""
     db = get_db()
@@ -86,21 +58,15 @@ def get_user_public_key(user_id):
     return None
 
 
-def encrypt_message(plaintext, aes_key):
-    """Encrypt message with AES (Fernet)"""
+def verify_message_signature(encrypted_content, signature, public_key):
+    """Verify message signature with RSA public key"""
     try:
-        cipher = Fernet(aes_key)
-        encrypted = cipher.encrypt(plaintext.encode())
-        return encrypted.decode('utf-8')
-    except Exception:
-        return None
-
-
-def sign_message(plaintext, private_key):
-    """Sign message with RSA private key"""
-    try:
-        message_hash = hashlib.sha256(plaintext.encode()).digest()
-        signature = private_key.sign(
+        if not signature:
+            return False
+        message_hash = hashlib.sha256(encrypted_content.encode()).digest()
+        signature_bytes = base64.b64decode(signature)
+        public_key.verify(
+            signature_bytes,
             message_hash,
             padding.PSS(
                 mgf=padding.MGF1(hashes.SHA256()),
@@ -108,26 +74,9 @@ def sign_message(plaintext, private_key):
             ),
             hashes.SHA256()
         )
-        return base64.b64encode(signature).decode('utf-8')
+        return True
     except Exception:
-        return None
-
-
-def encrypt_aes_key(aes_key_b64, public_key):
-    """Encrypt AES key with RSA public key"""
-    try:
-        aes_key_bytes = base64.urlsafe_b64decode(aes_key_b64)
-        encrypted_key = public_key.encrypt(
-            aes_key_bytes,
-            padding.OAEP(
-                mgf=padding.MGF1(algorithm=hashes.SHA256()),
-                algorithm=hashes.SHA256(),
-                label=None
-            )
-        )
-        return base64.b64encode(encrypted_key).decode('utf-8')
-    except Exception:
-        return None
+        return False
 
 
 @messages_bp.route('/api/users', methods=['GET']) # show list of users
@@ -240,6 +189,13 @@ def send_message():
         recipient = db.execute('SELECT id FROM users WHERE id = ?', (recipient_id,)).fetchone()
         if not recipient:
             return jsonify({'error': 'Odbiorca nie istnieje.'}), 400
+
+        # Verify signature if provided
+        if signature:
+            sender_public_key = get_user_public_key(my_id)
+            if sender_public_key:
+                if not verify_message_signature(encrypted_content, signature, sender_public_key):
+                    return jsonify({'error': 'Signature verification failed'}), 400
 
         # Insert message into database (already encrypted from frontend)
         cur = db.execute(

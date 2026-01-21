@@ -583,8 +583,8 @@ document.getElementById('sendForm').onsubmit = async function(e) {
             encryptedAESKey_sender = await encryptAESKeyWithPublicKey(aesKeyB64, myKeyData.public_key);
         }
         
-        // Sign message
-        const signature = await signMessage(msg);
+        // Sign encrypted content (not plaintext) - backend verifies encrypted_content
+        const signature = await signMessage(encryptedContent);
         if (!signature) {
             alert('Błąd podpisywania wiadomości');
             return;
