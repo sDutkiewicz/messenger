@@ -67,7 +67,7 @@ def list_users():
     db = get_db()
     my_id = get_current_user_id()
     users = db.execute('SELECT id, username FROM users WHERE id != ?', (my_id,)).fetchall()
-    return jsonify([{'id': u['id'], 'username': u['username']} for u in users])
+    return jsonify([{'id': u['id'], 'username': clean_input(u['username'])} for u in users])
 
 
 @messages_bp.route('/api/me', methods=['GET'])
@@ -90,7 +90,7 @@ def get_me():
     
     return jsonify({
         'id': user['id'], 
-        'username': user['username'],
+        'username': clean_input(user['username']),
         'in_2fa_recovery_mode': in_recovery
     })
 
@@ -143,7 +143,7 @@ def get_conversation(user_id):
         # Return encrypted content as-is (do not sanitize encrypted data!)
         result.append({
             'id': m['id'], 
-            'sender': m['sender'], 
+            'sender': clean_input(m['sender']),
             'sender_id': m['sender_id'], 
             'encrypted_content': m['encrypted_content'],
             'session_key_encrypted': m['session_key_encrypted'],
