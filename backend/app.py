@@ -150,15 +150,10 @@ def teardown_db(exception):
 
 
 if __name__ == '__main__':
-    print("=" * 70)
-    print("Messenger - Encrypted Communication Application")
-    print("=" * 70)
-    print("Run with Gunicorn (as non-root user):")
-    print("  gunicorn -w 4 -b 0.0.0.0:8000 --timeout 120 wsgi:app")
-    print("")
-    print("In Docker (automatically):")
-    print("  docker-compose up")
-    print("")
+    print("Messenger aplikacja")
+
+    
+    
     print("Reverse Proxy: Nginx on https://localhost")
     print("API Health: GET /api/health")
     print("Application: GET /")

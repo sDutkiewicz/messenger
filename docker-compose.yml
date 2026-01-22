@@ -6,19 +6,28 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     container_name: messenger_backend
-    ports:
-      - "8000:8000"
-    volumes:
-      - ./backend:/app/backend
-      - ./data:/app/data
     environment:
-      FLASK_ENV: development
+      FLASK_ENV: production
       FLASK_APP: app.py
-    depends_on:
-      - nginx
+      DATABASE_URL: sqlite:////data/messenger.db
+    volumes:
+      - ./data:/app/data
     networks:
       - messenger_network
     restart: unless-stopped
+    expose:
+      - "8000"
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: messenger_frontend
+    networks:
+      - messenger_network
+    restart: unless-stopped
+    expose:
+      - "80"
 
   nginx:
     build:
@@ -26,14 +35,14 @@ services:
       dockerfile: Dockerfile
     container_name: messenger_nginx
     ports:
-      - "80:80"
-      - "443:443"
+      - "3000:80"
+      - "3443:443"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./certs:/etc/nginx/certs:ro
-      - ./frontend:/usr/share/nginx/html:ro
     depends_on:
       - backend
+      - frontend
     networks:
       - messenger_network
     restart: unless-stopped
@@ -44,3 +53,5 @@ networks:
 
 volumes:
   data:
+
+
