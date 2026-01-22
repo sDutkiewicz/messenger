@@ -13,7 +13,7 @@ def get_current_user_id():
     """
     Return logged-in user ID from session.
     
-    Demo mode: returns user_id=1 (alice) if not logged in.
+    returns user_id=1 (alice) if not logged in.
     In production, should return None and endpoints should return 401.
     """
     user_id = session.get('user_id')
@@ -62,8 +62,7 @@ def get_user_public_key(user_id):
 @messages_bp.route('/api/users', methods=['GET'])
 def list_users():
     """
-    Pobierz listę wszystkich użytkowników (poza sobą)
-    Używane do wyświetlenia konwersacji w sidebar'ze
+    Download list of all users (id and username) except self
     """
     db = get_db()
     my_id = get_current_user_id()
@@ -74,9 +73,8 @@ def list_users():
 @messages_bp.route('/api/me', methods=['GET'])
 def get_me():
     """
-    Pobierz informacje o zalogowanym użytkowniku
-    - ID i username
-    - Czy user jest w 2FA recovery mode (forced 2FA setup)
+    Retrieve current user information.
+    Returns user ID, username, and 2FA recovery mode status.
     """
     db = get_db()
     my_id = get_current_user_id()
@@ -99,15 +97,14 @@ def get_me():
 @messages_bp.route('/api/messages/conversation/<int:user_id>', methods=['GET'])
 def get_conversation(user_id):
     """
-    Pobierz konwersację z innym użytkownikiem
-    - Wczytuje wszystkie wiadomości (wysłane i odebrane)
-    - Oznacza wiadomości od partnera jako przeczytane
-    - Zwraca encrypted_content + session_key_encrypted (frontend je deszyfruje)
+    Retrieve conversation with another user.
+    Loads all messages (sent and received), marks partner messages as read.
+    Returns encrypted_content and session_key_encrypted for frontend decryption.
     """
     db = get_db()
     my_id = get_current_user_id()
 
-    # Oznacz wszystkie wiadomości od tego użytkownika jako przeczytane
+    # Mark all messages from this user as read
     try:
         db.execute(
             'UPDATE messages SET is_read = 1 WHERE sender_id = ? AND recipient_id = ? AND is_read = 0',
@@ -117,7 +114,7 @@ def get_conversation(user_id):
     except Exception:
         pass
 
-    # Pobierz wszystkie wiadomości między mną a tym użytkownikiem
+    # Retrieve all messages between current user and this user
     messages = db.execute('''
         SELECT m.id, m.sender_id, m.recipient_id, m.encrypted_content, m.session_key_encrypted, m.signature, m.is_read, u.username as sender
         FROM messages m
@@ -129,9 +126,9 @@ def get_conversation(user_id):
     
     result = []
 
-    # Zwróć wiadomości z załącznikami (dane są encrypted - nie sanitizuj!)
+    # Return messages with attachments (data is encrypted - do not sanitize!)
     for m in messages:
-        # Pobierz załączniki dla tej wiadomości
+        # Retrieve attachments for this message
         atts = db.execute('SELECT id, filename FROM attachments WHERE message_id = ?', (m['id'],)).fetchall()
         attachments = []
         for a in atts:
@@ -143,7 +140,7 @@ def get_conversation(user_id):
                 pass
             attachments.append({'id': a['id'], 'filename': fname})
         
-        # Zwróć encrypted content as-is (nie sanitizuj encrypted danych!)
+        # Return encrypted content as-is (do not sanitize encrypted data!)
         result.append({
             'id': m['id'], 
             'sender': m['sender'], 
@@ -157,14 +154,14 @@ def get_conversation(user_id):
     return jsonify({'messages': result})
 
 
-# send a new message
+# Send a new message
 @messages_bp.route('/api/messages/send', methods=['POST'])
 def send_message():
     try:
         db = get_db()
         my_id = get_current_user_id()
         if my_id is None:
-            return jsonify({'error': 'Nieautoryzowany'}), 401
+            return jsonify({'error': 'Unauthorized'}), 401
 
         # Support both JSON and multipart/form-data (for attachments)
         if request.content_type and request.content_type.startswith('multipart/form-data'):
@@ -180,22 +177,18 @@ def send_message():
             signature = data.get('signature', '')
 
         if not recipient_id or not encrypted_content or not session_key_encrypted:
-            return jsonify({'error': 'Brak wymaganych pól szyfrowanej wiadomości.'}), 400
+            return jsonify({'error': 'Missing required encrypted message fields.'}), 400
         
         try:
             recipient_id = int(recipient_id)
         except (ValueError, TypeError):
-            return jsonify({'error': 'Nieprawidłowy odbiorca.'}), 400
+            return jsonify({'error': 'Invalid recipient.'}), 400
 
         # Verify recipient exists
         recipient = db.execute('SELECT id FROM users WHERE id = ?', (recipient_id,)).fetchone()
         if not recipient:
-            return jsonify({'error': 'Odbiorca nie istnieje.'}), 400
-
-        # Verify signature if provided
-        # NOTE: Signature verification is handled on frontend during message display
-        # Backend stores signature but does not verify it (JSEncrypt/Python crypto incompatibility)
-        # Frontend verifies with getSenderPublicKey() when displaying received messages
+            return jsonify({'error': 'Recipient does not exist.'}), 400
+       
 
         # Insert message into database (already encrypted from frontend)
         cur = db.execute(
@@ -205,7 +198,7 @@ def send_message():
         msg_id = cur.lastrowid
         db.commit()
 
-        # handle file attachments if any (multipart)
+        # Handle file attachments if any (multipart)
         if request.files:
             files = request.files.getlist('attachments')
             for f in files:
@@ -222,7 +215,7 @@ def send_message():
                 db.execute('INSERT INTO attachments (message_id, filename, encrypted_data) VALUES (?, ?, ?)', (msg_id, filename, data))
             db.commit()
 
-        return jsonify({'message': 'Wysłano.', 'id': msg_id}), 201
+        return jsonify({'message': 'Sent.', 'id': msg_id}), 201
     except Exception as e:
         return jsonify({'error': 'Server error', 'details': str(e)}), 500
 
@@ -233,12 +226,12 @@ def send_message():
 # Get public key for a user
 @messages_bp.route('/api/users/<int:user_id>/public-key', methods=['GET'])
 def get_user_public_key_route(user_id):
-    """Get public key for a user"""
+    """Retrieve RSA public key for specified user."""
     db = get_db()
     user = db.execute('SELECT public_key FROM users WHERE id = ?', (user_id,)).fetchone()
     
     if not user or not user['public_key']:
-        return jsonify({'error': 'Nie znaleziono klucza publicznego.'}), 404
+        return jsonify({'error': 'Public key not found.'}), 404
     
     return jsonify({'public_key': user['public_key']}), 200
 
