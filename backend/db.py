@@ -131,9 +131,9 @@ def generate_recovery_codes(count=10):
     import secrets
     codes = []
     for _ in range(count):
-        # Format: "2FA-XXXX-XXXX" (12 chars + dashes)
+        # Format: "XXXX-XXXX-XXXX" (12 chars + dashes, no prefix)
         random_part = secrets.token_hex(6).upper()  # 12 hex chars
-        code = f"2FA-{random_part[:4]}-{random_part[4:]}"
+        code = f"{random_part[:4]}-{random_part[4:8]}-{random_part[8:]}"
         codes.append(code)
     return codes
 
