@@ -136,15 +136,22 @@ async function verifySignature(plaintext, signature, senderPublicKeyPEM) {
  */
 async function encryptFileBinary(fileData, aesKeyB64) {
     try {
-        // Convert ArrayBuffer to Base64 string for CryptoJS
-        const binaryString = String.fromCharCode.apply(null, new Uint8Array(fileData));
+        // Convert ArrayBuffer to base64 string (like text for messages)
+        const uint8Array = new Uint8Array(fileData);
+        let binaryString = '';
+        for (let i = 0; i < uint8Array.length; i++) {
+            binaryString += String.fromCharCode(uint8Array[i]);
+        }
         const base64Data = btoa(binaryString);
         
-        // Encrypt the base64 string
+        // Encrypt using same method as messages
         const encrypted = CryptoJS.AES.encrypt(base64Data, CryptoJS.enc.Base64.parse(aesKeyB64), {
             mode: CryptoJS.mode.ECB,
             padding: CryptoJS.pad.Pkcs7
         });
+        
+        // Return as base64 (encrypted.toString() without OpenSSL header)
+        // encrypted.toString() returns "U2FsdGVk..." which IS base64
         return encrypted.toString();
     } catch (error) {
         console.error('File encryption error:', error);
@@ -155,13 +162,18 @@ async function encryptFileBinary(fileData, aesKeyB64) {
 /**
  * Decrypt file from encrypted base64 string
  */
-function decryptFileBinary(encryptedContent, aesKeyB64) {
+function decryptFileBinary(encryptedData, aesKeyB64) {
     try {
-        const decrypted = CryptoJS.AES.decrypt(encryptedContent, CryptoJS.enc.Base64.parse(aesKeyB64), {
+        // Decrypt using same method as messages
+        const decrypted = CryptoJS.AES.decrypt(encryptedData, CryptoJS.enc.Base64.parse(aesKeyB64), {
             mode: CryptoJS.mode.ECB,
             padding: CryptoJS.pad.Pkcs7
         });
+        
+        // Get the base64 string back
         const base64Data = decrypted.toString(CryptoJS.enc.Utf8);
+        
+        // Decode base64 to binary
         const binaryString = atob(base64Data);
         const bytes = new Uint8Array(binaryString.length);
         for (let i = 0; i < binaryString.length; i++) {

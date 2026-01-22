@@ -182,16 +182,22 @@ def send_message():
         # Insert message into database (already encrypted from frontend)
         msg_id = MessageQueries.send(my_id, recipient_id, encrypted_content, session_key_encrypted, signature)
 
-        # Handle file attachments if any (multipart)
-        if request.files:
-            files = request.files.getlist('attachments')
-            for f in files:
-                filename = sanitize_filename(f.filename)
-                data = f.read()
-                # limit file size
-                if len(data) > MAX_FILE_SIZE_BYTES:
+        # Handle attachments from JSON if any
+        attachments = data.get('attachments', [])
+        for att in attachments:
+            if isinstance(att, dict):
+                filename = sanitize_filename(att.get('filename', 'file'))
+                encrypted_data_b64 = att.get('encrypted_data', '')
+                
+                # encrypted_data is already a base64 string from frontend (format "U2FsdGVk...")
+                # Convert it to bytes for storage
+                try:
+                    encrypted_data = encrypted_data_b64.encode('utf-8')
+                    if len(encrypted_data) > MAX_FILE_SIZE_BYTES:
+                        continue
+                    AttachmentQueries.add(msg_id, filename, encrypted_data)
+                except Exception:
                     continue
-                AttachmentQueries.add(msg_id, filename, data)
 
         return jsonify({'message': 'Sent.', 'id': msg_id}), 201
     except Exception as e:
@@ -242,11 +248,12 @@ def download_attachment(att_id):
     if not has_permission:
         return jsonify({'error': 'No permission'}), status_code
     
-    # Return encrypted file data as base64 (frontend will decrypt it)
-    encrypted_data_b64 = base64.b64encode(att['encrypted_data']).decode('utf-8')
+    # Return encrypted file data
+    # encrypted_data is the raw UTF-8 bytes of the "U2FsdGVk..." string
+    encrypted_data_str = att['encrypted_data'].decode('utf-8')
     return jsonify({
         'id': att_id,
         'filename': att['filename'],
-        'encrypted_data': encrypted_data_b64
+        'encrypted_data': encrypted_data_str
     }), 200
 

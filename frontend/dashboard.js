@@ -419,28 +419,44 @@ async function sendMessage(e) {
         }));
         form.append('signature', signature);
         
-        // Encrypt and add attachments
+        // Collect encrypted attachments as base64
+        const attachments = [];
         const fileInput = document.getElementById('fileInput');
         if (fileInput && fileInput.files.length) {
             for (let i = 0; i < fileInput.files.length; i++) {
                 const file = fileInput.files[i];
                 const arrayBuffer = await file.arrayBuffer();
-                const encryptedFileData = await encryptFileBinary(arrayBuffer, aesKeyB64);
+                const encryptedFileDataB64 = await encryptFileBinary(arrayBuffer, aesKeyB64);
                 
-                if (!encryptedFileData) {
+                if (!encryptedFileDataB64) {
                     alert('Błąd szyfrowania pliku: ' + file.name);
                     return;
                 }
                 
-                const blob = new Blob([encryptedFileData], { type: 'application/octet-stream' });
-                form.append('attachments', blob, file.name);
+                attachments.push({
+                    filename: file.name,
+                    encrypted_data: encryptedFileDataB64
+                });
             }
         }
         
-        // Send message
+        // Build complete message object
+        const messageData = {
+            recipient_id: selectedUser.id,
+            encrypted_content: encryptedContent,
+            session_key_encrypted: JSON.stringify({
+                r: encryptedAESKey_recipient,
+                s: encryptedAESKey_sender
+            }),
+            signature: signature,
+            attachments: attachments
+        };
+        
+        // Send message as JSON
         const res = await fetch('/api/messages/send', {
             method: 'POST',
-            body: form,
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(messageData),
             credentials: 'same-origin'
         });
         
