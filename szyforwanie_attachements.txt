@@ -1,7 +1,0 @@
-Jak to działa:
-
-Frontend szyfruje plik AES-256 tym samym kluczem co wiadomość
-Frontend wysyła szyfrowany plik do backendu
-Backend przechowuje szyfrowany plik w bazie
-Przy pobieraniu - frontend pobiera szyfrowany plik, deszyfruje go lokalnie używając klucza z session_key_encrypted, pobiera plik
-Technika taka sama jak wiadomości - hybrid encryption (AES-256 + RSA).
