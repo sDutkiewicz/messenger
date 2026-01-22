@@ -88,3 +88,47 @@ def decrypt_private_key(encrypted_key_str, password, salt):
         return decrypted.decode('utf-8')
     except Exception:
         return None
+
+def encrypt_totp_secret(totp_secret, secret_key, salt):
+    """Encrypt TOTP secret using Argon2id key derivation from server secret"""
+    # Derive encryption key from server secret + salt
+    key_material = hash_secret_raw(
+        secret_key.encode(),
+        salt,
+        time_cost=2,
+        memory_cost=65536,
+        parallelism=1,
+        hash_len=32,
+        type=Type.ID
+    )
+    
+    # Encrypt with Fernet
+    key = base64.urlsafe_b64encode(key_material)
+    cipher = Fernet(key)
+    encrypted = cipher.encrypt(totp_secret.encode())
+    
+    return encrypted.decode('utf-8')
+
+
+def decrypt_totp_secret(encrypted_totp_str, secret_key, salt):
+    """Decrypt TOTP secret using Argon2id key derivation from server secret"""
+    try:
+        # Derive decryption key from server secret + salt
+        key_material = hash_secret_raw(
+            secret_key.encode(),
+            salt,
+            time_cost=2,
+            memory_cost=65536,
+            parallelism=1,
+            hash_len=32,
+            type=Type.ID
+        )
+        
+        # Decrypt with Fernet
+        key = base64.urlsafe_b64encode(key_material)
+        cipher = Fernet(key)
+        decrypted = cipher.decrypt(encrypted_totp_str.encode())
+        
+        return decrypted.decode('utf-8')
+    except Exception:
+        return None

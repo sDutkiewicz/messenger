@@ -8,7 +8,7 @@ import pyotp
 from flask import current_app
 from session_keys import SessionKeys
 from db_queries import UserQueries
-from backend.helpers.qr_cleanup import cleanup_qr_files_for_user
+from helpers.qr_cleanup import cleanup_qr_files_for_user
 from constants import MSG_2FA_VERIFICATION_SUCCESS
 
 
@@ -29,7 +29,8 @@ def user_has_2fa_enabled(user):
         return False
     try:
         totp_secret = user['totp_secret']
-        return totp_secret and totp_secret != 'TOTP_SECRET_PLACEHOLDER'
+        # TOTP secret should be non-empty (decrypted from DB)
+        return bool(totp_secret) and len(totp_secret) > 0
     except Exception:
         return False
 

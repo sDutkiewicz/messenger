@@ -1,5 +1,5 @@
 from flask import Blueprint, request, jsonify, g, session, make_response, current_app
-from backend.helpers.sanitize import clean_input
+from helpers.sanitize import clean_input
 from argon2 import PasswordHasher
 import os
 import re
@@ -12,11 +12,11 @@ import base64
 from constants import *
 from session_keys import SessionKeys
 from db_queries import UserQueries, LoginAttemptQueries, RecoveryCodeQueries
-from backend.helpers.rate_limiter import get_block_status, apply_failed_attempt_delay, record_login_attempt, reset_failed_attempts, check_rate_limit
-from backend.helpers.qr_cleanup import cleanup_qr_file, cleanup_qr_files_for_user
-from backend.helpers.crypto_helpers import is_strong_password, generate_rsa_keypair, encrypt_private_key, decrypt_private_key
-from backend.helpers.password_helpers import verify_password
-from backend.helpers.totp_helpers import verify_totp_code, user_has_2fa_enabled, generate_totp_qr, complete_2fa_login
+from helpers.rate_limiter import get_block_status, apply_failed_attempt_delay, record_login_attempt, reset_failed_attempts, check_rate_limit
+from helpers.qr_cleanup import cleanup_qr_file, cleanup_qr_files_for_user
+from helpers.crypto_helpers import is_strong_password, generate_rsa_keypair, encrypt_private_key, decrypt_private_key
+from helpers.password_helpers import verify_password
+from helpers.totp_helpers import verify_totp_code, user_has_2fa_enabled, generate_totp_qr, complete_2fa_login
 
 auth_bp = Blueprint('auth', __name__)
 ph = PasswordHasher()  # Argon2id for password_hash

@@ -93,7 +93,7 @@ def add_example_users():
     db = sqlite3.connect(DATABASE)
     cursor = db.cursor()
     from argon2 import PasswordHasher
-    from auth import generate_rsa_keypair, encrypt_private_key
+    from helpers.crypto_helpers import generate_rsa_keypair, encrypt_private_key
     ph = PasswordHasher()
     
     users = [

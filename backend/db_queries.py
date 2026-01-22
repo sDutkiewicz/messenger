@@ -12,29 +12,89 @@ class UserQueries:
     @staticmethod
     def get_by_id(user_id):
         """Get user by ID"""
+        from flask import current_app
+        from helpers.crypto_helpers import decrypt_totp_secret
+        
         db = get_db()
-        return db.execute('SELECT * FROM users WHERE id = ?', (user_id,)).fetchone()
+        user = db.execute('SELECT * FROM users WHERE id = ?', (user_id,)).fetchone()
+        
+        # Decrypt TOTP secret if present
+        if user and user['totp_secret']:
+            try:
+                decrypted_totp = decrypt_totp_secret(user['totp_secret'], current_app.config['SECRET_KEY'], user['salt'])
+                if decrypted_totp:
+                    user = dict(user)
+                    user['totp_secret'] = decrypted_totp
+            except Exception:
+                pass
+        
+        return user
     
     @staticmethod
     def get_by_username(username):
         """Get user by username"""
+        from flask import current_app
+        from helpers.crypto_helpers import decrypt_totp_secret
+        
         db = get_db()
-        return db.execute('SELECT * FROM users WHERE username = ?', (username,)).fetchone()
+        user = db.execute('SELECT * FROM users WHERE username = ?', (username,)).fetchone()
+        
+        # Decrypt TOTP secret if present
+        if user and user['totp_secret']:
+            try:
+                decrypted_totp = decrypt_totp_secret(user['totp_secret'], current_app.config['SECRET_KEY'], user['salt'])
+                if decrypted_totp:
+                    user = dict(user)
+                    user['totp_secret'] = decrypted_totp
+            except Exception:
+                pass
+        
+        return user
     
     @staticmethod
     def get_by_email(email):
         """Get user by email"""
+        from flask import current_app
+        from helpers.crypto_helpers import decrypt_totp_secret
+        
         db = get_db()
-        return db.execute('SELECT * FROM users WHERE email = ?', (email,)).fetchone()
+        user = db.execute('SELECT * FROM users WHERE email = ?', (email,)).fetchone()
+        
+        # Decrypt TOTP secret if present
+        if user and user['totp_secret']:
+            try:
+                decrypted_totp = decrypt_totp_secret(user['totp_secret'], current_app.config['SECRET_KEY'], user['salt'])
+                if decrypted_totp:
+                    user = dict(user)
+                    user['totp_secret'] = decrypted_totp
+            except Exception:
+                pass
+        
+        return user
     
     @staticmethod
     def get_by_username_or_email(username):
         """Get user by username OR email"""
+        from flask import current_app
+        from helpers.crypto_helpers import decrypt_totp_secret
+        
         db = get_db()
-        return db.execute(
+        user = db.execute(
             'SELECT * FROM users WHERE username = ? OR email = ?',
             (username, username)
         ).fetchone()
+        
+        # Decrypt TOTP secret if present
+        if user and user['totp_secret']:
+            try:
+                decrypted_totp = decrypt_totp_secret(user['totp_secret'], current_app.config['SECRET_KEY'], user['salt'])
+                if decrypted_totp:
+                    user = dict(user)
+                    user['totp_secret'] = decrypted_totp
+            except Exception:
+                pass
+        
+        return user
     
     @staticmethod
     def get_all_except(exclude_id):
@@ -75,10 +135,16 @@ class UserQueries:
     @staticmethod
     def create_user(username, email, password_hash, salt, public_key, private_key_encrypted, totp_secret):
         """Create new user, return user ID"""
+        from flask import current_app
+        from helpers.crypto_helpers import encrypt_totp_secret
+        
         db = get_db()
+        # Encrypt TOTP secret before storing
+        encrypted_totp = encrypt_totp_secret(totp_secret, current_app.config['SECRET_KEY'], salt)
+        
         cur = db.execute(
             'INSERT INTO users (username, email, password_hash, salt, public_key, private_key_encrypted, totp_secret) VALUES (?, ?, ?, ?, ?, ?, ?)',
-            (username, email, password_hash, salt, public_key, private_key_encrypted, totp_secret)
+            (username, email, password_hash, salt, public_key, private_key_encrypted, encrypted_totp)
         )
         db.commit()
         return cur.lastrowid
@@ -105,11 +171,22 @@ class UserQueries:
     
     @staticmethod
     def update_totp_secret(user_id, totp_secret):
-        """Update TOTP secret"""
+        """Update TOTP secret (encrypts before storing)"""
+        from flask import current_app
+        from helpers.crypto_helpers import encrypt_totp_secret
+        
         db = get_db()
+        user = db.execute('SELECT salt FROM users WHERE id = ?', (user_id,)).fetchone()
+        
+        if not user:
+            return
+        
+        # Encrypt TOTP secret before storing
+        encrypted_totp = encrypt_totp_secret(totp_secret, current_app.config['SECRET_KEY'], user['salt'])
+        
         db.execute(
             'UPDATE users SET totp_secret = ? WHERE id = ?',
-            (totp_secret, user_id)
+            (encrypted_totp, user_id)
         )
         db.commit()
     
@@ -333,16 +410,3 @@ class RecoveryCodeQueries:
                 return user
         
         return None
-
-
-class RecoveryCodeQueries:
-    """Queries related to 2FA recovery codes"""
-    
-    @staticmethod
-    def get_all_for_user(user_id):
-        """Get all unused recovery code hashes for user"""
-        db = get_db()
-        return db.execute(
-            'SELECT code_hash FROM two_fa_recovery_codes WHERE user_id = ? AND used = FALSE',
-            (user_id,)
-        ).fetchall()
