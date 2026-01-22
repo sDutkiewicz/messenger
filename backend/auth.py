@@ -277,6 +277,9 @@ def reset_password():
         # Update password and re-encrypted private key
         UserQueries.update_keys_and_password(user_id, new_password_hash, public_key, private_key_encrypted)
         
+        # Cleanup QR files from password reset (if any)
+        cleanup_qr_files_for_user(user_id)
+        
         # Clear session
         session.pop(SessionKeys.CAN_RESET_PASSWORD, None)
         session.pop(SessionKeys.PASSWORD_RESET_USER_ID, None)
