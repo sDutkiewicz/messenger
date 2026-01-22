@@ -112,9 +112,8 @@ def add_example_users():
             public_key, private_key = generate_rsa_keypair()
             private_key_encrypted = encrypt_private_key(private_key, password, salt)
             
-            # TOTP secret (2FA)
-            import pyotp
-            totp_secret = pyotp.random_base32()
+            # No TOTP secret for example users - they login without 2FA
+            totp_secret = ''
             
             cursor.execute(
                 'INSERT INTO users (username, email, password_hash, salt, public_key, private_key_encrypted, totp_secret) VALUES (?, ?, ?, ?, ?, ?, ?)',
