@@ -191,7 +191,7 @@ def forgot_password():
     session[SessionKeys.PASSWORD_RESET_EMAIL] = email
     
     return jsonify({
-        'message': 'Sprawdź swoją skrzynkę odbioczą.',
+        'message': MSG_PASSWORD_RESET_LINK_SENT,
         'requires_recovery_code': True
     }), 200
 
