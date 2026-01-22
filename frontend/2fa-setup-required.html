@@ -33,7 +33,7 @@
 </head>
 <body>
     <div id="setupContainer">
-        <h2>⚠️ WYMAGANA KONFIGURACJA 2FA</h2>
+        <h2>WYMAGANA KONFIGURACJA 2FA</h2>
         
         <div class="warning-box">
             <strong>Twoja poprzednia konfiguracja 2FA została usunięta.</strong>
@@ -60,7 +60,7 @@
         <div id="twofaMsg" style="margin-top: 15px;"></div>
 
         <div id="recoveryCodesSection" style="display: none; margin-top: 30px; padding: 20px; background-color: #e8f5e9; border: 1px solid #4caf50; border-radius: 5px;">
-            <h3>✅ Kody Odzyskiwania</h3>
+            <h3>Kody Odzyskiwania</h3>
             <p>Przechowaj te kody w bezpiecznym miejscu. Jeśli znowu stracisz dostęp do 2FA, będziesz ich potrzebować.</p>
             <div id="recoveryCodesList" style="background-color: white; padding: 15px; border-radius: 3px; font-family: monospace; margin: 10px 0; max-height: 200px; overflow-y: auto;"></div>
             <div style="margin-top: 15px;">
@@ -135,7 +135,7 @@
         const data = await res.json();
         
         if (res.ok) {
-            showMessage('✅ 2FA skonfigurowane pomyślnie!', 'green');
+            showMessage('2FA skonfigurowane pomyślnie!', 'green');
             
             // Show recovery codes if available
             if (data.recovery_codes && data.recovery_codes.length > 0) {
@@ -167,7 +167,7 @@
                     'Każdy kod można użyć tylko raz.\n\n' +
                     currentRecoveryCodes.map((code, i) => `${i + 1}. ${code}`).join('\n') +
                     '\n\nData: ' + new Date().toLocaleString('pl-PL') +
-                    '\n\n⚠️ PRZECHOWUJ W BEZPIECZNYM MIEJSCU!';
+                    '\n\nPRZECHOWUJ W BEZPIECZNYM MIEJSCU!';
         
         const blob = new Blob([text], { type: 'text/plain' });
         const url = URL.createObjectURL(blob);
