@@ -1,13 +1,11 @@
-
 from flask import Blueprint, request, jsonify, g, session, make_response, current_app
 from db import get_db
 from sanitize import clean_input
 from argon2 import PasswordHasher
+from argon2.low_level import hash_secret_raw, Type
 from cryptography.hazmat.primitives.asymmetric import rsa
-from cryptography.hazmat.primitives import serialization, hashes
+from cryptography.hazmat.primitives import serialization
 from cryptography.fernet import Fernet
-from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-from cryptography.hazmat.backends import default_backend
 import os
 import re
 import time
@@ -17,13 +15,20 @@ import io
 import base64
 import glob
 import sqlite3
-import hashlib
 
 auth_bp = Blueprint('auth', __name__)
-ph = PasswordHasher()
+ph = PasswordHasher()  # Argon2id hasher dla password_hash
+
+# ========== PASSWORD VALIDATION ==========
 
 def is_strong_password(password):
-    # Minimum 12 chars, at least 1 upper, 1 lower, 1 digit
+    """
+    Walidacja siły hasła:
+    - Minimum 12 znaków
+    - Przynajmniej 1 wielka litera
+    - Przynajmniej 1 mała litera
+    - Przynajmniej 1 cyfra
+    """
     if len(password) < 12:
         return False
     if not re.search(r'[A-Z]', password):
@@ -41,8 +46,7 @@ def generate_rsa_keypair():
     """Generate RSA 2048-bit key pair"""
     private_key = rsa.generate_private_key(
         public_exponent=65537,
-        key_size=2048,
-        backend=default_backend()
+        key_size=2048
     )
     public_key = private_key.public_key()
     
@@ -63,18 +67,20 @@ def generate_rsa_keypair():
 
 
 def encrypt_private_key(private_key_pem, password, salt):
-    """Encrypt private key using password-derived key"""
-    # Derive encryption key from password
-    kdf = PBKDF2HMAC(
-        algorithm=hashes.SHA256(),
-        length=32,
-        salt=salt,
-        iterations=100000,
-        backend=default_backend()
+    """Encrypt private key using Argon2id key derivation"""
+    # Derive encryption key from password using Argon2id
+    key_material = hash_secret_raw(
+        password.encode(),
+        salt,
+        time_cost=3,
+        memory_cost=65536,
+        parallelism=1,
+        hash_len=32,
+        type=Type.ID
     )
-    key = base64.urlsafe_b64encode(kdf.derive(password.encode()))
     
-    # Encrypt private key
+    # Encrypt private key with Fernet
+    key = base64.urlsafe_b64encode(key_material)
     cipher = Fernet(key)
     encrypted = cipher.encrypt(private_key_pem.encode())
     
@@ -82,19 +88,21 @@ def encrypt_private_key(private_key_pem, password, salt):
 
 
 def decrypt_private_key(encrypted_key_str, password, salt):
-    """Decrypt private key using password-derived key"""
+    """Decrypt private key using Argon2id key derivation"""
     try:
-        # Derive decryption key from password
-        kdf = PBKDF2HMAC(
-            algorithm=hashes.SHA256(),
-            length=32,
-            salt=salt,
-            iterations=100000,
-            backend=default_backend()
+        # Derive decryption key from password using Argon2id
+        key_material = hash_secret_raw(
+            password.encode(),
+            salt,
+            time_cost=3,
+            memory_cost=65536,
+            parallelism=1,
+            hash_len=32,
+            type=Type.ID
         )
-        key = base64.urlsafe_b64encode(kdf.derive(password.encode()))
         
-        # Decrypt private key
+        # Decrypt private key with Fernet
+        key = base64.urlsafe_b64encode(key_material)
         cipher = Fernet(key)
         decrypted = cipher.decrypt(encrypted_key_str.encode())
         
@@ -185,25 +193,6 @@ def verify_password(user, password):
         return True
     except Exception:
         return False
-
-
-def login_without_2fa(user):
-    """Complete login for user without 2FA"""
-    try:
-        session['user_id'] = user['id']
-        db = get_db()
-        db.execute('UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE id = ?', (user['id'],))
-        db.commit()
-    except Exception:
-        pass
-    
-    return jsonify({'message': 'Zalogowano pomyślnie.', 'id': user['id']}), 200
-
-
-def login_with_2fa_required(user):
-    """Require 2FA verification for user"""
-    session['pre_2fa_user_id'] = user['id']
-    return jsonify({'message': 'Wymagana weryfikacja 2FA.', '2fa_required': True}), 200
 
 
 def complete_2fa_login(user):
@@ -397,9 +386,18 @@ def login():
     
     # Check if user has 2FA enabled
     if user_has_2fa_enabled(user):
-        return login_with_2fa_required(user)
+        # Require 2FA verification
+        session['pre_2fa_user_id'] = user['id']
+        return jsonify({'message': 'Wymagana weryfikacja 2FA.', '2fa_required': True}), 200
     else:
-        return login_without_2fa(user)
+        # Complete login for user without 2FA
+        try:
+            session['user_id'] = user['id']
+            db.execute('UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE id = ?', (user['id'],))
+            db.commit()
+        except Exception:
+            pass
+        return jsonify({'message': 'Zalogowano pomyślnie.', 'id': user['id']}), 200
 
 
 # ========== 2FA VERIFICATION ==========
