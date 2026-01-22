@@ -59,6 +59,7 @@ async function loadUserList() {
 function selectUser(user) {
     selectedUser = user;
     document.getElementById('convTitle').textContent = 'Rozmowa z: ' + user.username;
+    document.getElementById('messages').style.display = 'block';
     document.getElementById('sendForm').style.display = 'flex';
     
     // Highlight selected user
