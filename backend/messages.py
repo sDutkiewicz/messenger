@@ -1,6 +1,6 @@
 from flask import Blueprint, request, jsonify
 from flask import session, current_app
-from sanitize import clean_input
+from backend.helpers.sanitize import clean_input
 import base64
 
 # Import helper modules

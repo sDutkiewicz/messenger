@@ -1,38 +1,11 @@
-import os
-import glob
+"""Rate limiting and login attempt tracking"""
 import time
 from datetime import datetime, timedelta
+from flask import current_app, jsonify, make_response
 from constants import RATE_LIMIT_SHORT_ATTEMPTS, RATE_LIMIT_SHORT_DURATION_MIN
 from constants import RATE_LIMIT_LONG_ATTEMPTS, RATE_LIMIT_LONG_DURATION_MIN
+from constants import ERROR_TOO_MANY_ATTEMPTS_LONG, ERROR_TOO_MANY_ATTEMPTS_SHORT
 from db_queries import LoginAttemptQueries
-
-
-def cleanup_qr_file(qr_path):
-    """Remove temporary QR code file"""
-    try:
-        if not qr_path or not qr_path.startswith('/static/qrs/'):
-            return
-        
-        # Convert web path to filesystem path
-        fs_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), qr_path.lstrip('/'))
-        if os.path.exists(fs_path):
-            os.remove(fs_path)
-    except Exception:
-        pass  # Silent fail for cleanup operations
-
-
-def cleanup_qr_files_for_user(user_id):
-    """Remove all QR files for user (wildcard cleanup)"""
-    try:
-        qr_dir = os.path.join(os.path.dirname(__file__), 'static', 'qrs')
-        pattern = os.path.join(qr_dir, f"{user_id}_*.png")
-        for filepath in glob.glob(pattern):
-            try:
-                os.remove(filepath)
-            except Exception:
-                pass
-    except Exception:
-        pass  # Silent fail for cleanup operations
 
 
 def calculate_block_remaining_time(username, attempts_threshold, block_duration_min):
@@ -50,7 +23,6 @@ def calculate_block_remaining_time(username, attempts_threshold, block_duration_
         try:
             last_attempt_time = datetime.fromisoformat(timestamp_str)
         except ValueError:
-            # Fallback: try parsing without timezone
             last_attempt_time = datetime.fromisoformat(timestamp_str.split('+')[0])
         
         # Calculate unblock time
@@ -100,6 +72,37 @@ def get_block_status(username):
 def apply_failed_attempt_delay(failed_count):
     """Apply progressive backoff delay on failed attempts (0.5s-1.0s)"""
     if failed_count >= 3:
-        time.sleep(1.0)    # 1 second after 3+ attempts
+        time.sleep(1.0)
     else:
-        time.sleep(0.5)    # 0.5 seconds before
+        time.sleep(0.5)
+
+
+def record_login_attempt(username, success):
+    """Log login attempt to database"""
+    try:
+        LoginAttemptQueries.record(username, success)
+    except Exception as e:
+        current_app.logger.error('Failed to record login attempt: %s', str(e))
+
+
+def reset_failed_attempts(username):
+    """Reset failed login attempts after successful login"""
+    try:
+        LoginAttemptQueries.clear_failed_attempts(username)
+    except Exception as e:
+        current_app.logger.error('Failed to reset login attempts: %s', str(e))
+
+
+def check_rate_limit(username):
+    """Check if user has exceeded login attempt limit"""
+    is_blocked, remaining_seconds, block_type = get_block_status(username)
+    
+    if is_blocked:
+        error_msg = ERROR_TOO_MANY_ATTEMPTS_LONG if block_type == 'long' else ERROR_TOO_MANY_ATTEMPTS_SHORT
+        retry_after = RATE_LIMIT_LONG_DURATION_MIN * 60 if block_type == 'long' else RATE_LIMIT_SHORT_DURATION_MIN * 60
+        
+        resp = make_response(jsonify({'error': error_msg}), 429)
+        resp.headers['Retry-After'] = str(retry_after)
+        return resp
+    
+    return None

@@ -1,5 +1,5 @@
 
-# Session key constants to prevent typos and ensure consistency.
+# Session key constants to prevent typos and ensure consistency
 
 class SessionKeys:
     """Constants for all session keys used in authentication flow"""

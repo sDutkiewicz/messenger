@@ -1,257 +1,28 @@
 from flask import Blueprint, request, jsonify, g, session, make_response, current_app
-from sanitize import clean_input
+from backend.helpers.sanitize import clean_input
 from argon2 import PasswordHasher
-from argon2.low_level import hash_secret_raw, Type
-from cryptography.hazmat.primitives.asymmetric import rsa
-from cryptography.hazmat.primitives import serialization
-from cryptography.fernet import Fernet
 import os
 import re
 import time
-import pyotp
-import qrcode
-import io
-import base64
-import glob
 import sqlite3
+import pyotp
+import base64
 
-# import files from this project
+# Import helper modules
 from constants import *
 from session_keys import SessionKeys
 from db_queries import UserQueries, LoginAttemptQueries, RecoveryCodeQueries
-from helpers import cleanup_qr_file, cleanup_qr_files_for_user, get_block_status, apply_failed_attempt_delay
+from backend.helpers.rate_limiter import get_block_status, apply_failed_attempt_delay, record_login_attempt, reset_failed_attempts, check_rate_limit
+from backend.helpers.qr_cleanup import cleanup_qr_file, cleanup_qr_files_for_user
+from backend.helpers.crypto_helpers import is_strong_password, generate_rsa_keypair, encrypt_private_key, decrypt_private_key
+from backend.helpers.password_helpers import verify_password
+from backend.helpers.totp_helpers import verify_totp_code, user_has_2fa_enabled, generate_totp_qr, complete_2fa_login
 
 auth_bp = Blueprint('auth', __name__)
 ph = PasswordHasher()  # Argon2id for password_hash
 
-# PASSWORD VALIDATION 
 
-def is_strong_password(password):
-    """
-    Validate password strength:
-    - Minimum 12 characters (MIN_PASSWORD_LENGTH)
-    - At least 1 uppercase letter
-    - At least 1 lowercase letter
-    - At least 1 digit
-    """
-    if len(password) < MIN_PASSWORD_LENGTH:
-        return False
-    if not re.search(r'[A-Z]', password):
-        return False
-    if not re.search(r'[a-z]', password):
-        return False
-    if not re.search(r'\d', password):
-        return False
-    return True
-
-
-# ENCRYPTION HELPERS
-
-def generate_rsa_keypair():
-    """Generate RSA 2048-bit key pair"""
-    private_key = rsa.generate_private_key(
-        public_exponent=65537,
-        key_size=2048
-    )
-    public_key = private_key.public_key()
-    
-    # Serialize public key
-    public_pem = public_key.public_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PublicFormat.SubjectPublicKeyInfo
-    ).decode('utf-8')
-    
-    # Serialize private key (unencrypted for now)
-    private_pem = private_key.private_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PrivateFormat.PKCS8,
-        encryption_algorithm=serialization.NoEncryption()
-    ).decode('utf-8')
-    
-    return public_pem, private_pem
-
-
-def encrypt_private_key(private_key_pem, password, salt):
-    """Encrypt private key using Argon2id key derivation"""
-    # Derive encryption key from password using Argon2id
-    key_material = hash_secret_raw(
-        password.encode(),
-        salt,
-        time_cost=3,
-        memory_cost=65536,
-        parallelism=1,
-        hash_len=32,
-        type=Type.ID
-    )
-    
-    # Encrypt private key with Fernet
-    key = base64.urlsafe_b64encode(key_material)
-    cipher = Fernet(key)
-    encrypted = cipher.encrypt(private_key_pem.encode())
-    
-    return encrypted.decode('utf-8')
-
-
-def decrypt_private_key(encrypted_key_str, password, salt):
-    """Decrypt private key using Argon2id key derivation"""
-    try:
-        # Derive decryption key from password using Argon2id
-        key_material = hash_secret_raw(
-            password.encode(),
-            salt,
-            time_cost=3,
-            memory_cost=65536,
-            parallelism=1,
-            hash_len=32,
-            type=Type.ID
-        )
-        
-        # Decrypt private key with Fernet
-        key = base64.urlsafe_b64encode(key_material)
-        cipher = Fernet(key)
-        decrypted = cipher.decrypt(encrypted_key_str.encode())
-        
-        return decrypted.decode('utf-8')
-    except Exception:
-        return None
-
-
-# HELPERS FUNCTIONS 
-def user_has_2fa_enabled(user):
-    """Check if user has 2FA configured (skip for example users)"""
-    if not user:
-        return False
-    
-    # Example users (alice, bob, carol) skip 2FA for testing
-    if user['username'] in ('alice', 'bob', 'carol'):
-        return False
-    
-    try:
-        totp_secret = user['totp_secret']
-        return totp_secret and totp_secret != 'TOTP_SECRET_PLACEHOLDER'
-    except Exception:
-        return False
-
-
-def verify_totp_code(totp_secret, code):
-    """Verify TOTP code against secret"""
-    try:
-        totp = pyotp.TOTP(totp_secret)
-        return totp.verify(code, valid_window=1)
-    except Exception:
-        return False
-
-
-def record_login_attempt(username, success):
-    """Log login attempt to database"""
-    try:
-        LoginAttemptQueries.record(username, success)
-    except Exception as e:
-        current_app.logger.error('Failed to record login attempt: %s', str(e))
-
-
-def reset_failed_attempts(username):
-    """Reset failed login attempts after successful login"""
-    try:
-        LoginAttemptQueries.clear_failed_attempts(username)
-    except Exception as e:
-        current_app.logger.error('Failed to reset login attempts: %s', str(e))
-
-
-def check_rate_limit(username):
-    """Check if user has exceeded login attempt limit with progressive blocking"""
-    is_blocked, remaining_seconds, block_type = get_block_status(username)
-    
-    if is_blocked:
-        if block_type == 'long':
-            # Block for 30 minutes
-            error_msg = ERROR_TOO_MANY_ATTEMPTS_LONG
-            retry_after = RATE_LIMIT_LONG_DURATION_MIN * 60
-        else:
-            # Block for 5 minutes
-            error_msg = ERROR_TOO_MANY_ATTEMPTS_SHORT
-            retry_after = RATE_LIMIT_SHORT_DURATION_MIN * 60
-        
-        resp = make_response(jsonify({'error': error_msg}), 429)
-        resp.headers['Retry-After'] = str(retry_after)
-        return resp
-    
-    return None
-
-
-def verify_password(user, password):
-    """Verify password against hash"""
-    if not user:
-        return False
-    try:
-        ph.verify(user['password_hash'], password)
-        return True
-    except Exception as e:
-        current_app.logger.debug('Password verification failed: %s', str(e))
-        return False
-
-
-def complete_2fa_login(user):
-    """Complete login after 2FA verification"""
-    try:
-        username = user['username']
-        session.pop(SessionKeys.PRE_2FA_USER_ID, None)
-        session.pop(SessionKeys.PRE_2FA_PASSWORD, None)
-        session[SessionKeys.USER_ID] = user['id']
-        session[SessionKeys.TWO_FA_VERIFIED] = True
-        UserQueries.update_last_login(user['id'])
-        
-        # Reset failed login attempts after successful login
-        reset_failed_attempts(username)
-        
-        # Cleanup temporary QR files for this user
-        cleanup_qr_files_for_user(user['id'])
-        
-        return jsonify({'message': MSG_2FA_VERIFICATION_SUCCESS, 'id': user['id']}), 200
-    except Exception as e:
-        current_app.logger.error('Error in complete_2fa_login: %s', str(e))
-        return jsonify({'error': 'Błąd podczas logowania.'}), 500
-
-
-# REGISTRATION 
-
-def generate_totp_qr(totp_secret, email, username):
-    """Generate TOTP QR code and return as data URL + file path"""
-    try:
-        # Provisioning URI format: otpauth://totp/issuer:username?secret=...
-        # This is a standard format recognized by authenticator apps (Google Authenticator, Authy, etc.)
-        provisioning_uri = pyotp.TOTP(totp_secret).provisioning_uri(
-            name=email or username, 
-            issuer_name='Messenger_Projekt'
-        )
-    except Exception:
-        return None, None, None
-    
-    try:
-        qr_img = qrcode.make(provisioning_uri)
-        
-        # Generate data URL for frontend
-        buf = io.BytesIO()
-        qr_img.save(buf, format='PNG')
-        buf.seek(0)
-        qr_b64 = base64.b64encode(buf.read()).decode('ascii')
-        provisioning_qr = f'data:image/png;base64,{qr_b64}'
-        
-        # Save temporary file
-        try:
-            qr_dir = os.path.join(os.path.dirname(__file__), 'static', 'qrs')
-            os.makedirs(qr_dir, exist_ok=True)
-            filename = f'reg_{int(time.time())}_{os.urandom(4).hex()}.png'
-            filepath = os.path.join(qr_dir, filename)
-            qr_img.save(filepath, format='PNG')
-            provisioning_qr_path = f'/static/qrs/{filename}'
-        except Exception:
-            provisioning_qr_path = None
-        
-        # returning uri, data url, and file path
-        return provisioning_uri, provisioning_qr, provisioning_qr_path
-    except Exception:
-        return None, None, None
+# ========== REGISTRATION ==========
 
 
 @auth_bp.route('/api/register', methods=['POST'])
