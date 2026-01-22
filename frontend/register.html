@@ -22,81 +22,157 @@
             <img id="provisionQr" alt="QR 2FA">
             <div>Klucz: <span id="totpSecret"></span></div>
             <form id="verify2faForm">
-                <input type="text" name="code" placeholder="Kod 2FA" required pattern="\d{6}" inputmode="numeric">
+                <input type="text" name="code" placeholder="000000" required pattern="\d{6}" inputmode="numeric" style="font-size: 20px; letter-spacing: 5px; text-align: center;">
                 <button type="submit">Weryfikuj 2FA</button>
             </form>
             <div id="twofaMsg"></div>
+        </div>
+
+        <!-- Recovery codes section (shown after 2FA verification) -->
+        <div id="recoveryCodesSection" style="display: none; margin-top: 30px; padding: 20px; background-color: #fff3cd; border: 1px solid #ffc107; border-radius: 5px;">
+            <h3>⚠️ KODY ODZYSKIWANIA</h3>
+            <p><strong>Bardzo ważne!</strong> Jeśli stracisz dostęp do aplikacji 2FA, będziesz potrzebować tych kodów.</p>
+            <p>Przechowuj je w bezpiecznym miejscu (drukuj, PDF, sejf itp.).</p>
+            <div id="recoveryCodesList" style="background-color: white; padding: 15px; border-radius: 3px; font-family: monospace; margin: 10px 0; max-height: 200px; overflow-y: auto;"></div>
+            <div style="margin-top: 15px;">
+                <button type="button" id="downloadRecoveryCodes" style="background-color: #28a745; margin-right: 10px;">📥 Pobierz Kody</button>
+                <button type="button" id="continueAfterRecovery" style="background-color: #007bff; opacity: 0.5; cursor: not-allowed;" disabled>Przejdź do logowania</button>
+            </div>
+            <p id="downloadHint" style="color: #d32f2f; font-size: 14px; margin-top: 10px; text-align: center;"><strong>⚠️ Musisz najpierw pobrać kody!</strong></p>
         </div>
         <a href="login.html">Masz już konto? Zaloguj się</a>
     </div>
     <script>
     function showMessage(elementId, text, color) {
         const el = document.getElementById(elementId);
-        el.textContent = text;
-        el.style.color = color;
+        if (el) {
+            el.textContent = text;
+            el.style.color = color;
+        }
     }
     
-    document.getElementById('registerForm').onsubmit = async function(e) {
-        e.preventDefault();
-        const form = e.target;
-        const data = {
-            username: form.username.value,
-            email: form.email.value,
-            password: form.password.value
-        };
-        const res = await fetch('/api/register', {
-            method: 'POST',
-            credentials: 'same-origin',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify(data)
-        });
-        
-        if (res.ok) {
-            const body = await res.json();
-            showMessage('registerMsg', 'Rejestracja udana! Dokończ konfigurację 2FA.', 'green');
+    // Ensure DOM is loaded before attaching event listeners
+    document.addEventListener('DOMContentLoaded', function() {
+        document.getElementById('registerForm').onsubmit = async function(e) {
+            e.preventDefault();
+            const form = e.target;
+            const data = {
+                username: form.username.value,
+                email: form.email.value,
+                password: form.password.value
+            };
+            const res = await fetch('/api/register', {
+                method: 'POST',
+                credentials: 'same-origin',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(data)
+            });
             
-            if (body.provisioning_qr || body.provisioning_uri || body.totp_secret) {
-                const twofa = document.getElementById('twofaSetup');
-                const qr = document.getElementById('provisionQr');
-                const secret = document.getElementById('totpSecret');
+            if (res.ok) {
+                const body = await res.json();
+                showMessage('registerMsg', 'Rejestracja udana! Dokończ konfigurację 2FA.', 'green');
                 
-                if (body.provisioning_qr) {
-                    qr.src = body.provisioning_qr;
-                } else if (body.provisioning_qr_path) {
-                    qr.src = body.provisioning_qr_path;
-                } else if (body.provisioning_uri) {
-                    qr.src = 'https://chart.googleapis.com/chart?chs=200x200&cht=qr&chl=' + encodeURIComponent(body.provisioning_uri);
+                if (body.provisioning_qr || body.provisioning_uri || body.totp_secret) {
+                    const twofa = document.getElementById('twofaSetup');
+                    const qr = document.getElementById('provisionQr');
+                    const secret = document.getElementById('totpSecret');
+                    
+                    if (body.provisioning_qr) {
+                        qr.src = body.provisioning_qr;
+                    } else if (body.provisioning_qr_path) {
+                        qr.src = body.provisioning_qr_path;
+                    } else if (body.provisioning_uri) {
+                        qr.src = 'https://chart.googleapis.com/chart?chs=200x200&cht=qr&chl=' + encodeURIComponent(body.provisioning_uri);
+                    }
+                    secret.textContent = body.totp_secret || '';
+                    twofa.style.display = 'block';
+                } else {
+                    localStorage.setItem('loggedIn', '1');
+                    setTimeout(() => { window.location.href = 'dashboard.html'; }, 500);
                 }
-                secret.textContent = body.totp_secret || '';
-                twofa.style.display = 'block';
             } else {
-                localStorage.setItem('loggedIn', '1');
-                setTimeout(() => { window.location.href = 'dashboard.html'; }, 500);
+                const err = await res.json();
+                showMessage('registerMsg', err.error || 'Błąd rejestracji', 'red');
             }
-        } else {
-            const err = await res.json();
-            showMessage('registerMsg', err.error || 'Błąd rejestracji', 'red');
-        }
-    };
+        };
 
-    document.getElementById('verify2faForm').onsubmit = async function(e) {
-        e.preventDefault();
-        const code = e.target.code.value.trim();
-        const res = await fetch('/api/verify-2fa', {
-            method: 'POST',
-            credentials: 'same-origin',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({code})
-        });
-        
-        if (res.ok) {
-            showMessage('twofaMsg', '2FA skonfigurowane. Możesz się zalogować.', 'green');
-            setTimeout(() => { window.location.href = 'login.html'; }, 1000);
-        } else {
-            const err = await res.json();
-            showMessage('twofaMsg', err.error || 'Błąd weryfikacji 2FA', 'red');
-        }
-    };
+        document.getElementById('verify2faForm').onsubmit = async function(e) {
+            e.preventDefault();
+            const code = e.target.code.value.trim();
+            const res = await fetch('/api/verify-2fa', {
+                method: 'POST',
+                credentials: 'same-origin',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({code})
+            });
+            
+            if (res.ok) {
+                const data = await res.json();
+                console.log('2FA verification response:', data);
+                showMessage('twofaMsg', '2FA skonfigurowane!', 'green');
+                
+                // Show recovery codes if available
+                if (data.recovery_codes && data.recovery_codes.length > 0) {
+                    console.log('Displaying recovery codes:', data.recovery_codes);
+                    sessionStorage.setItem('recovery_codes', JSON.stringify(data.recovery_codes));
+                    const listEl = document.getElementById('recoveryCodesList');
+                    listEl.innerHTML = data.recovery_codes
+                        .map((code, i) => `<div>${i + 1}. ${code}</div>`)
+                        .join('');
+                    
+                    document.getElementById('twofaSetup').style.display = 'none';
+                    document.getElementById('recoveryCodesSection').style.display = 'block';
+                } else {
+                    console.log('No recovery codes in response');
+                    setTimeout(() => { window.location.href = 'login.html'; }, 1000);
+                }
+            } else {
+                const err = await res.json();
+                showMessage('twofaMsg', err.error || 'Błąd weryfikacji 2FA', 'red');
+            }
+        };
+
+        // Download recovery codes as TXT
+        document.getElementById('downloadRecoveryCodes').onclick = function() {
+            const codes = JSON.parse(sessionStorage.getItem('recovery_codes') || '[]');
+            console.log('Download handler - codes from storage:', codes);
+            if (!codes.length) {
+                alert('Brak kodów do pobrania!');
+                return;
+            }
+            
+            const text = 'KODY ODZYSKIWANIA - MESSENGER\n' +
+                        '============================\n' +
+                        'Jeśli stracisz dostęp do aplikacji 2FA, użyj jednego z tych kodów.\n' +
+                        'Każdy kod można użyć tylko raz.\n\n' +
+                        codes.map((code, i) => `${i + 1}. ${code}`).join('\n') +
+                        '\n\nData: ' + new Date().toLocaleString('pl-PL');
+            
+            const blob = new Blob([text], { type: 'text/plain' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `2fa-recovery-codes-${Date.now()}.txt`;
+            a.click();
+            URL.revokeObjectURL(url);
+            
+            // Unlock the continue button after download
+            sessionStorage.setItem('codes_downloaded', 'true');
+            document.getElementById('continueAfterRecovery').disabled = false;
+            document.getElementById('continueAfterRecovery').style.opacity = '1';
+            document.getElementById('continueAfterRecovery').style.cursor = 'pointer';
+            document.getElementById('downloadHint').style.display = 'none';
+        };
+
+        document.getElementById('continueAfterRecovery').onclick = function() {
+            if (!sessionStorage.getItem('codes_downloaded')) {
+                alert('Najpierw pobierz kody odzyskiwania!');
+                return;
+            }
+            localStorage.setItem('loggedIn', '1');
+            window.location.href = 'login.html';
+        };
+    });
     </script>
 </body>
 </html>

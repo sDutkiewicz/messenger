@@ -18,10 +18,24 @@
         <div id="twofaSection">
             <h3>Weryfikacja 2FA</h3>
             <form id="login2faForm">
-                <input type="text" name="code" placeholder="Kod 2FA" required pattern="\d{6}" inputmode="numeric">
+                <input type="text" name="code" placeholder="000000" required pattern="\d{6}" inputmode="numeric" style="font-size: 20px; letter-spacing: 5px; text-align: center;">
                 <button type="submit">Weryfikuj kod</button>
+                <button type="button" id="lostAccessBtn" style="background-color: #ff9800; margin-top: 10px;">Straciłem dostęp do 2FA</button>
             </form>
             <div id="login2faMsg"></div>
+            
+            <!-- Recovery code section (hidden by default) -->
+            <div id="recoveryCodeSection" style="display: none; margin-top: 20px; padding: 15px; border: 1px solid #ddd; border-radius: 5px;">
+                <h4>Użyj kodu odzyskiwania</h4>
+                <p>Jeśli utraciłeś dostęp do aplikacji 2FA, możesz użyć kodu odzyskiwania.</p>
+                <form id="recoveryCodeForm">
+                    <input type="email" name="email" placeholder="Email" required>
+                    <input type="text" name="recovery_code" placeholder="Kod odzyskiwania (2FA-XXXX-XXXX)" required>
+                    <button type="submit">Weryfikuj kod odzyskiwania</button>
+                    <button type="button" id="backTo2faBtn" style="background-color: #999; margin-left: 10px;">Wróć do 2FA</button>
+                </form>
+                <div id="recoveryCodeMsg"></div>
+            </div>
         </div>
         <a href="register.html">Nie masz konta? Zarejestruj się</a>
     </div>
@@ -118,6 +132,58 @@
         } else {
             const err = await res.json().catch(() => ({}));
             showMessage('login2faMsg', err.error || 'Błąd weryfikacji 2FA', 'red');
+        }
+    };
+
+    // Recovery code button handlers
+    document.getElementById('lostAccessBtn').onclick = function() {
+        document.getElementById('login2faForm').style.display = 'none';
+        document.getElementById('recoveryCodeSection').style.display = 'block';
+        showMessage('login2faMsg', '');
+    };
+
+    document.getElementById('backTo2faBtn').onclick = function() {
+        document.getElementById('login2faForm').style.display = 'block';
+        document.getElementById('recoveryCodeSection').style.display = 'none';
+        document.getElementById('recoveryCodeForm').reset();
+        showMessage('recoveryCodeMsg', '');
+    };
+
+    document.getElementById('recoveryCodeForm').onsubmit = async function(e) {
+        e.preventDefault();
+        const email = e.target.email.value.trim().toLowerCase();
+        const recovery_code = e.target.recovery_code.value.trim();
+        
+        const res = await fetch('/api/auth/2fa-recovery', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({email, recovery_code})
+        });
+        
+        const data = await res.json();
+        
+        if (res.ok) {
+            const password = sessionStorage.getItem('_loginPassword');
+            if (password) {
+                const keyLoaded = await fetchAndStorePrivateKey(password);
+                if (keyLoaded) {
+                    showMessage('recoveryCodeMsg', 'Recovery code zaakceptowany! Musisz teraz ustawić nowy 2FA...', 'green');
+                    localStorage.setItem('loggedIn', '1');
+                    sessionStorage.removeItem('_loginPassword');
+                    // Redirect directly to forced 2FA setup page
+                    setTimeout(() => { window.location.href = '2fa-setup-required.html'; }, 1000);
+                } else {
+                    showMessage('recoveryCodeMsg', 'Recovery OK ale nie udało się załadować klucza', 'orange');
+                    localStorage.setItem('loggedIn', '1');
+                    sessionStorage.removeItem('_loginPassword');
+                    setTimeout(() => { window.location.href = 'dashboard.html?setup_2fa=1'; }, 1500);
+                }
+            } else {
+                showMessage('recoveryCodeMsg', 'Błąd: nie znaleziono hasła', 'red');
+            }
+        } else {
+            showMessage('recoveryCodeMsg', data.error || 'Nieprawidłowy kod odzyskiwania', 'red');
         }
     };
     </script>

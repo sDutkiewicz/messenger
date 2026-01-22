@@ -3,6 +3,36 @@
 // === IMPORTS ===
 // crypto.js provides all cryptographic operations
 
+// === FORCED 2FA SETUP CHECK ===
+const urlParams = new URLSearchParams(window.location.search);
+if (urlParams.get('setup_2fa') === '1') {
+    // Redirect to forced 2FA setup page
+    window.location.href = '2fa-setup-required.html';
+}
+
+// === CHECK IF IN RECOVERY MODE ===
+// If user used recovery code, they MUST complete 2FA setup before accessing dashboard
+async function checkRecoveryMode() {
+    try {
+        const res = await fetch('/api/me', { credentials: 'same-origin' });
+        if (!res.ok) {
+            window.location.href = 'login.html';
+            return;
+        }
+        
+        const data = await res.json();
+        if (data.in_2fa_recovery_mode) {
+            // Force redirect to 2FA setup
+            window.location.href = '2fa-setup-required.html';
+            return;
+        }
+    } catch (e) {
+        console.error('Recovery mode check failed:', e);
+    }
+}
+
+checkRecoveryMode();
+
 // === INITIALIZATION ===
 if (!localStorage.getItem('loggedIn')) {
     window.location.href = 'login.html';

@@ -89,14 +89,23 @@ def list_users():
 
 @messages_bp.route('/api/me', methods=['GET']) # get current user info
 def get_me():
+    from flask import session
     db = get_db()
     my_id = get_current_user_id()
     if my_id is None:
-        return jsonify({'id': None, 'username': None}), 200
+        return jsonify({'id': None, 'username': None, 'in_2fa_recovery_mode': False}), 200
     user = db.execute('SELECT id, username FROM users WHERE id = ?', (my_id,)).fetchone()
     if not user:
-        return jsonify({'id': None, 'username': None}), 200
-    return jsonify({'id': user['id'], 'username': user['username']})
+        return jsonify({'id': None, 'username': None, 'in_2fa_recovery_mode': False}), 200
+    
+    # Check if user is in 2FA recovery mode
+    in_recovery = session.get('2fa_recovery_mode', False)
+    
+    return jsonify({
+        'id': user['id'], 
+        'username': user['username'],
+        'in_2fa_recovery_mode': in_recovery
+    })
 
 
 

@@ -73,6 +73,16 @@ def init_db():
         timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         success INTEGER
     );
+
+    CREATE TABLE IF NOT EXISTS two_fa_recovery_codes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        code_hash TEXT NOT NULL,
+        used BOOLEAN DEFAULT FALSE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        used_at TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users(id)
+    );
     ''')
     db.commit()
     db.close()
@@ -112,4 +122,104 @@ def add_example_users():
             )
     db.commit()
     db.close()
+
+
+# ========== 2FA RECOVERY CODES ==========
+
+def generate_recovery_codes(count=10):
+    """Generate random recovery codes"""
+    import secrets
+    codes = []
+    for _ in range(count):
+        # Format: "2FA-XXXX-XXXX" (12 chars + dashes)
+        random_part = secrets.token_hex(6).upper()  # 12 hex chars
+        code = f"2FA-{random_part[:4]}-{random_part[4:]}"
+        codes.append(code)
+    return codes
+
+
+def hash_recovery_code(code):
+    """Hash recovery code using Argon2 (same as password hashing)"""
+    from argon2 import PasswordHasher
+    ph = PasswordHasher()
+    return ph.hash(code)
+
+
+def verify_recovery_code(code, code_hash):
+    """Verify recovery code against hash"""
+    from argon2 import PasswordHasher
+    ph = PasswordHasher()
+    try:
+        ph.verify(code_hash, code)
+        return True
+    except Exception:
+        return False
+
+
+def save_recovery_codes(user_id, codes):
+    """Save hashed recovery codes to database"""
+    db = get_db()
+    cursor = db.cursor()
     
+    # Delete old codes for this user
+    cursor.execute('DELETE FROM two_fa_recovery_codes WHERE user_id = ?', (user_id,))
+    
+    # Insert new codes
+    for code in codes:
+        code_hash = hash_recovery_code(code)
+        cursor.execute(
+            'INSERT INTO two_fa_recovery_codes (user_id, code_hash, used) VALUES (?, ?, FALSE)',
+            (user_id, code_hash)
+        )
+    
+    db.commit()
+
+
+def mark_recovery_code_used(user_id, code):
+    """Mark recovery code as used"""
+    from datetime import datetime
+    db = get_db()
+    cursor = db.cursor()
+    code_hash = hash_recovery_code(code)
+    
+    cursor.execute(
+        '''UPDATE two_fa_recovery_codes 
+           SET used = TRUE, used_at = ? 
+           WHERE user_id = ? AND code_hash = ? AND used = FALSE''',
+        (datetime.now(), user_id, code_hash)
+    )
+    db.commit()
+    
+    # Return how many codes were updated (should be 1 if valid)
+    return cursor.rowcount
+
+
+def verify_and_get_user_by_recovery_code(email, code):
+    """Verify recovery code and return user if valid"""
+    db = get_db()
+    cursor = db.cursor()
+    
+    # Get user by email
+    cursor.execute('SELECT id, totp_secret FROM users WHERE email = ?', (email,))
+    user = cursor.fetchone()
+    
+    if not user:
+        return None
+    
+    # Get recovery codes for this user
+    cursor.execute(
+        '''SELECT code_hash FROM two_fa_recovery_codes 
+           WHERE user_id = ? AND used = FALSE''',
+        (user['id'],)
+    )
+    codes = cursor.fetchall()
+    
+    if not codes:
+        return None
+    
+    # Check if provided code matches any hash
+    for row in codes:
+        if verify_recovery_code(code, row['code_hash']):
+            return user
+    
+    return None

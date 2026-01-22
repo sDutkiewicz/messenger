@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Konfiguracja 2FA - Messenger</title>
+    <link rel="stylesheet" href="styles.css">
+    <style>
+        #setupContainer {
+            max-width: 500px;
+            margin: 40px auto;
+            padding: 30px;
+            background-color: #fff3cd;
+            border: 2px solid #ff6b6b;
+            border-radius: 10px;
+        }
+        #setupContainer h2 {
+            color: #d32f2f;
+            text-align: center;
+        }
+        #setupContainer p {
+            color: #333;
+            line-height: 1.6;
+        }
+        .warning-box {
+            background-color: #ffebee;
+            border-left: 4px solid #d32f2f;
+            padding: 15px;
+            margin: 15px 0;
+            border-radius: 3px;
+        }
+    </style>
+</head>
+<body>
+    <div id="setupContainer">
+        <h2>⚠️ WYMAGANA KONFIGURACJA 2FA</h2>
+        
+        <div class="warning-box">
+            <strong>Twoja poprzednia konfiguracja 2FA została usunięta.</strong>
+            <p>Aby kontynuować, musisz natychmiast ustawić nowy 2FA.</p>
+        </div>
+
+        <p>Zeskanuj poniższy kod QR w aplikacji uwierzytelniającej (np. Google Authenticator, Authy):</p>
+        
+        <div style="text-align: center; margin: 20px 0;">
+            <img id="provisionQr" alt="QR 2FA" style="max-width: 250px; border: 1px solid #ddd; padding: 10px;">
+        </div>
+
+        <p><strong>Klucz (jeśli potrzebujesz wpisać ręcznie):</strong></p>
+        <div style="background-color: white; padding: 15px; border-radius: 3px; font-family: monospace; font-size: 14px; text-align: center; word-break: break-all;">
+            <span id="totpSecret" style="user-select: all;"></span>
+        </div>
+
+        <form id="verify2faForm" style="margin-top: 30px;">
+            <label>Wpisz 6-cyfrowy kod z aplikacji:</label>
+            <input type="text" name="code" placeholder="000000" required pattern="\d{6}" inputmode="numeric" style="font-size: 20px; letter-spacing: 5px; text-align: center;">
+            <button type="submit" style="width: 100%; margin-top: 15px;">Weryfikuj i Zapisz</button>
+        </form>
+
+        <div id="twofaMsg" style="margin-top: 15px;"></div>
+
+        <div id="recoveryCodesSection" style="display: none; margin-top: 30px; padding: 20px; background-color: #e8f5e9; border: 1px solid #4caf50; border-radius: 5px;">
+            <h3>✅ Kody Odzyskiwania</h3>
+            <p>Przechowaj te kody w bezpiecznym miejscu. Jeśli znowu stracisz dostęp do 2FA, będziesz ich potrzebować.</p>
+            <div id="recoveryCodesList" style="background-color: white; padding: 15px; border-radius: 3px; font-family: monospace; margin: 10px 0; max-height: 200px; overflow-y: auto;"></div>
+            <div style="margin-top: 15px;">
+                <button type="button" id="downloadRecoveryCodes" style="background-color: #28a745; margin-right: 10px; color: white; padding: 10px 20px; border: none; border-radius: 3px; cursor: pointer;">📥 Pobierz Kody</button>
+                <button type="button" id="finishSetup" style="background-color: #007bff; color: white; padding: 10px 20px; border: none; border-radius: 3px; cursor: pointer;">Zakończ Konfigurację</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+    let currentRecoveryCodes = [];
+
+    function showMessage(text, color) {
+        const el = document.getElementById('twofaMsg');
+        el.textContent = text;
+        el.style.color = color;
+    }
+
+    // Fetch user data and 2FA setup info
+    async function initialize() {
+        try {
+            const res = await fetch('/api/me', { credentials: 'same-origin' });
+            if (!res.ok) {
+                window.location.href = 'login.html';
+                return;
+            }
+            
+            const user = await res.json();
+            
+            // Fetch 2FA setup (get QR code and secret)
+            const setup2faRes = await fetch('/api/setup-2fa-forced', { 
+                credentials: 'same-origin' 
+            });
+            
+            if (setup2faRes.ok) {
+                const data = await setup2faRes.json();
+                
+                // Set QR code
+                const qrImg = document.getElementById('provisionQr');
+                if (data.provisioning_qr) {
+                    qrImg.src = data.provisioning_qr;
+                } else if (data.provisioning_uri) {
+                    // Fallback: generate QR code via Google Charts
+                    const qrUrl = 'https://chart.googleapis.com/chart?chs=250x250&cht=qr&chl=' + encodeURIComponent(data.provisioning_uri);
+                    qrImg.src = qrUrl;
+                }
+                
+                document.getElementById('totpSecret').textContent = data.totp_secret || '';
+                
+                // Store secret in session for verification
+                sessionStorage.setItem('_setup2faSecret', data.totp_secret);
+            } else {
+                showMessage('Błąd ładowania konfiguracji 2FA', 'red');
+            }
+        } catch (error) {
+            console.error('Błąd inicjalizacji:', error);
+            showMessage('Błąd sieci', 'red');
+        }
+    }
+
+    document.getElementById('verify2faForm').onsubmit = async function(e) {
+        e.preventDefault();
+        const code = e.target.code.value.trim();
+        
+        const res = await fetch('/api/verify-2fa-forced', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({code})
+        });
+        
+        const data = await res.json();
+        
+        if (res.ok) {
+            showMessage('✅ 2FA skonfigurowane pomyślnie!', 'green');
+            
+            // Show recovery codes if available
+            if (data.recovery_codes && data.recovery_codes.length > 0) {
+                currentRecoveryCodes = data.recovery_codes;
+                const listEl = document.getElementById('recoveryCodesList');
+                listEl.innerHTML = data.recovery_codes
+                    .map((code, i) => `<div>${i + 1}. ${code}</div>`)
+                    .join('');
+                
+                document.getElementById('verify2faForm').style.display = 'none';
+                document.getElementById('recoveryCodesSection').style.display = 'block';
+            } else {
+                // No recovery codes? Go to dashboard
+                setTimeout(() => { 
+                    window.location.href = 'dashboard.html'; 
+                }, 1000);
+            }
+        } else {
+            showMessage(data.error || 'Błąd weryfikacji 2FA', 'red');
+        }
+    };
+
+    document.getElementById('downloadRecoveryCodes').onclick = function() {
+        if (!currentRecoveryCodes.length) return;
+        
+        const text = 'KODY ODZYSKIWANIA - MESSENGER\n' +
+                    '============================\n\n' +
+                    'Jeśli stracisz dostęp do aplikacji 2FA, użyj jednego z poniższych kodów.\n' +
+                    'Każdy kod można użyć tylko raz.\n\n' +
+                    currentRecoveryCodes.map((code, i) => `${i + 1}. ${code}`).join('\n') +
+                    '\n\nData: ' + new Date().toLocaleString('pl-PL') +
+                    '\n\n⚠️ PRZECHOWUJ W BEZPIECZNYM MIEJSCU!';
+        
+        const blob = new Blob([text], { type: 'text/plain' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `2fa-recovery-codes-${new Date().toISOString().split('T')[0]}.txt`;
+        a.click();
+        URL.revokeObjectURL(url);
+    };
+
+    document.getElementById('finishSetup').onclick = function() {
+        window.location.href = 'dashboard.html';
+    };
+
+    // Initialize on page load
+    initialize();
+    </script>
+</body>
+</html>

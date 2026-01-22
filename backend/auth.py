@@ -309,6 +309,10 @@ def register():
             totp_secret, email, username
         )
         
+        # Generate recovery codes (plaintext for this registration only!)
+        from db import generate_recovery_codes
+        recovery_codes = generate_recovery_codes(10)
+        
         # Store in session
         session['reg_pending'] = {
             'username': username,
@@ -318,7 +322,8 @@ def register():
             'public_key': public_key,
             'private_key_encrypted': private_key_encrypted,
             'totp_secret': totp_secret,
-            'provisioning_qr_path': provisioning_qr_path
+            'provisioning_qr_path': provisioning_qr_path,
+            'recovery_codes': recovery_codes
         }
         
         return jsonify({
@@ -426,6 +431,11 @@ def _verify_2fa_registration(code, db):
         )
         db.commit()
         new_id = cur.lastrowid
+        
+        # Use recovery codes from session (generated in /api/register)
+        recovery_codes = reg.get('recovery_codes', [])
+        from db import save_recovery_codes
+        save_recovery_codes(new_id, recovery_codes)
 
     except sqlite3.IntegrityError as e:
         m = str(e)
@@ -440,16 +450,20 @@ def _verify_2fa_registration(code, db):
     except Exception:
         return jsonify({'error': 'Rejestracja nie powiodła się.'}), 500
 
+    # Get recovery codes from session before clearing it
+    recovery_codes = reg.get('recovery_codes', [])
+    
     # Finalize session
     session.pop('reg_pending', None)
     session['user_id'] = new_id
     session['2fa_verified'] = True
 
-    # Cleanup QR file
+    # Cleanup QR file from registration
     try:
         qr_path = reg.get('provisioning_qr_path')
         if qr_path and qr_path.startswith('/static/qrs/'):
-            fs_path = os.path.join(os.path.dirname(__file__), qr_path.lstrip('/'))
+            # Build correct path: go up from backend/ to parent, then into static/
+            fs_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), qr_path.lstrip('/'))
             if os.path.exists(fs_path):
                 try:
                     os.remove(fs_path)
@@ -458,7 +472,11 @@ def _verify_2fa_registration(code, db):
     except Exception:
         pass
 
-    return jsonify({'message': 'Rejestracja zakończona pomyślnie.', 'id': new_id}), 201
+    return jsonify({
+        'message': 'Rejestracja zakończona pomyślnie.',
+        'id': new_id,
+        'recovery_codes': recovery_codes
+    }), 201
 
 
 def _verify_2fa_login(code, db):
@@ -543,6 +561,157 @@ def logout():
         session.pop('pre_2fa_user_id', None)
         session.pop('reg_pending', None)
         session.pop('2fa_verified', None)
+        session.pop('2fa_recovery_mode', None)
     except Exception:
         pass
     return jsonify({'message': 'Wylogowano.'}), 200
+
+
+# ========== 2FA RECOVERY - RECOVERY CODE VERIFICATION ==========
+
+@auth_bp.route('/api/auth/2fa-recovery', methods=['POST'])
+def recovery_code_verification():
+    """
+    Verify recovery code when user lost access to 2FA app.
+    Flow:
+    1. User is in 2FA verification step (pre_2fa_user_id set)
+    2. User provides recovery code instead of TOTP code
+    3. Backend verifies recovery code
+    4. Backend removes 2FA (sets totp_secret to NULL)
+    5. Backend creates session
+    6. Frontend shows: FORCED 2FA SETUP (user must set up new 2FA immediately)
+    """
+    data = request.get_json() or {}
+    email = data.get('email', '').strip().lower()
+    recovery_code = data.get('recovery_code', '').strip()
+    
+    if not email or not recovery_code:
+        return jsonify({'error': 'Email i recovery code są wymagane.'}), 400
+    
+    from db import verify_and_get_user_by_recovery_code, mark_recovery_code_used
+    db = get_db()
+    
+    # Verify recovery code and get user
+    user = verify_and_get_user_by_recovery_code(email, recovery_code)
+    
+    if not user:
+        # Security: Don't reveal if email/code is invalid
+        time.sleep(0.5)
+        return jsonify({'error': 'Nieprawidłowy kod odzyskiwania lub email.'}), 401
+    
+    # Recovery code is valid! Mark it as used
+    mark_recovery_code_used(user['id'], recovery_code)
+    
+    # Remove 2FA (force setup new one) - set to empty string instead of NULL
+    db.execute('UPDATE users SET totp_secret = "" WHERE id = ?', (user['id'],))
+    db.commit()
+    
+    # Create session
+    session['user_id'] = user['id']
+    session['2fa_verified'] = True
+    session['2fa_recovery_mode'] = True  # ← Flag to force setup new 2FA
+    
+    return jsonify({
+        'success': True,
+        'message': '2FA recovery kod zaakceptowany. Musisz teraz ustawić nowy 2FA.',
+        'requires_2fa_setup': True,
+        'user_id': user['id']
+    }), 200
+
+# ========== FORCED 2FA SETUP (after recovery) ==========
+
+@auth_bp.route('/api/setup-2fa-forced', methods=['GET'])
+def setup_2fa_forced():
+    """Get 2FA setup info for forced setup after recovery code usage"""
+    user_id = session.get('user_id')
+    
+    if not user_id:
+        return jsonify({'error': 'Nie jesteś zalogowany'}), 401
+    
+    # Get user info for QR generation
+    db = get_db()
+    user = db.execute('SELECT email, username FROM users WHERE id = ?', (user_id,)).fetchone()
+    
+    if not user:
+        return jsonify({'error': 'Użytkownik nie znaleziony'}), 401
+    
+    # Generate new TOTP secret
+    totp_secret = pyotp.random_base32()
+    
+    # Generate QR code with user email
+    provisioning_uri, provisioning_qr, provisioning_qr_path = generate_totp_qr(
+        totp_secret, user['email'], user['username']
+    )
+    
+    # Store in session temporarily
+    session['_force_2fa_secret'] = totp_secret
+    session['_setup2fa_qr_path'] = provisioning_qr_path
+    
+    return jsonify({
+        'totp_secret': totp_secret,
+        'provisioning_uri': provisioning_uri,
+        'provisioning_qr': provisioning_qr,
+        'provisioning_qr_path': provisioning_qr_path
+    }), 200
+
+
+@auth_bp.route('/api/verify-2fa-forced', methods=['POST'])
+def verify_2fa_forced():
+    """Verify and save 2FA setup after recovery code usage"""
+    data = request.get_json() or {}
+    code = str(data.get('code', '')).strip()
+    user_id = session.get('user_id')
+    
+    if not user_id:
+        return jsonify({'error': 'Nie jesteś zalogowany'}), 401
+    
+    if not code:
+        return jsonify({'error': 'Kod jest wymagany'}), 400
+    
+    totp_secret = session.get('_force_2fa_secret')
+    if not totp_secret:
+        return jsonify({'error': 'Sesja 2FA wygasła'}), 401
+    
+    # Verify TOTP code
+    if not verify_totp_code(totp_secret, code):
+        time.sleep(0.5)
+        return jsonify({'error': 'Nieprawidłowy kod 2FA'}), 401
+    
+    db = get_db()
+    
+    # Update user with new TOTP secret
+    db.execute('UPDATE users SET totp_secret = ? WHERE id = ?', (totp_secret, user_id))
+    db.commit()
+    
+    # Generate new recovery codes
+    from db import generate_recovery_codes, save_recovery_codes
+    recovery_codes = generate_recovery_codes(10)
+    save_recovery_codes(user_id, recovery_codes)
+    
+    # Cleanup session and QR file
+    qr_path = session.get('_setup2fa_qr_path')
+    
+    session.pop('_force_2fa_secret', None)
+    session.pop('2fa_recovery_mode', None)
+    session.pop('_setup2fa_qr_path', None)
+    
+    # Cleanup QR file from forced setup
+    try:
+        if qr_path and qr_path.startswith('/static/qrs/'):
+            # Build correct path: go up from backend/ to parent, then into static/
+            fs_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), qr_path.lstrip('/'))
+            if os.path.exists(fs_path):
+                try:
+                    os.remove(fs_path)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    except Exception:
+        pass
+    
+    return jsonify({
+        'success': True,
+        'message': 'Nowy 2FA i recovery codes skonfigurowane',
+        'recovery_codes': recovery_codes
+    }), 200
