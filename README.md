@@ -44,7 +44,7 @@ python app.py
 ```
 messenger/
 ├── backend/                    # Flask API
-|   ├──data/                      # Baza danych SQLite 
+|   ├── data/                      # Baza danych SQLite 
 │   ├── app.py                 # Główna aplikacja
 │   ├── auth.py                # Endpoints autentykacji
 │   ├── messages.py            # Endpoints wiadomości
