@@ -1,12 +1,23 @@
 from flask import Blueprint, request, jsonify
-from db import get_db
-from flask import session
+from flask import session, current_app
 from sanitize import clean_input
 import base64
 
+# Import helper modules
+from session_keys import SessionKeys
+from db_queries import UserQueries, MessageQueries, AttachmentQueries, LoginAttemptQueries
+from constants import MAX_FILE_SIZE_BYTES, ERROR_UNAUTHORIZED, ERROR_USER_NOT_FOUND
 
 # Blueprint for message-related routes
 messages_bp = Blueprint('messages', __name__)
+
+
+def sanitize_filename(filename):
+    """Safely sanitize attachment filename"""
+    try:
+        return clean_input(filename) if filename else None
+    except Exception:
+        return None
 
 
 def get_current_user_id():
@@ -16,18 +27,18 @@ def get_current_user_id():
     returns user_id=1 (alice) if not logged in.
     In production, should return None and endpoints should return 401.
     """
-    user_id = session.get('user_id')
+    user_id = session.get(SessionKeys.USER_ID)
     if user_id is None:
         return 1  # Demo user - change in production
     return user_id
 
 
-def check_message_permission(user_id, msg_id, db):
+def check_message_permission(user_id, msg_id):
     """Check if user has permission to access message (sender or recipient)"""
     if user_id is None:
-        return False, {'error': 'Unauthorized'}, 401
+        return False, {'error': ERROR_UNAUTHORIZED}, 401
     
-    msg = db.execute('SELECT sender_id, recipient_id FROM messages WHERE id = ?', (msg_id,)).fetchone()
+    msg = MessageQueries.get_by_id(msg_id)
     if not msg:
         return False, {'error': 'Message not found'}, 404
     
@@ -42,8 +53,7 @@ def get_user_public_key(user_id):
     Retrieve user's RSA public key from database.
     Used for encrypting AES key for message recipients.
     """
-    db = get_db()
-    user = db.execute('SELECT public_key FROM users WHERE id = ?', (user_id,)).fetchone()
+    user = UserQueries.get_by_id(user_id)
     
     if not user or not user['public_key']:
         return None
@@ -54,7 +64,8 @@ def get_user_public_key(user_id):
             user['public_key'].encode()
         )
         return public_key
-    except Exception:
+    except Exception as e:
+        current_app.logger.error('Error loading public key: %s', str(e))
         return None
 
 
@@ -64,9 +75,8 @@ def list_users():
     """
     Download list of all users (id and username) except self
     """
-    db = get_db()
     my_id = get_current_user_id()
-    users = db.execute('SELECT id, username FROM users WHERE id != ?', (my_id,)).fetchall()
+    users = UserQueries.get_all_except(my_id)
     return jsonify([{'id': u['id'], 'username': clean_input(u['username'])} for u in users])
 
 
@@ -76,17 +86,16 @@ def get_me():
     Retrieve current user information.
     Returns user ID, username, and 2FA recovery mode status.
     """
-    db = get_db()
     my_id = get_current_user_id()
     if my_id is None:
         return jsonify({'id': None, 'username': None, 'in_2fa_recovery_mode': False}), 200
     
-    user = db.execute('SELECT id, username FROM users WHERE id = ?', (my_id,)).fetchone()
+    user = UserQueries.get_by_id(my_id)
     if not user:
         return jsonify({'id': None, 'username': None, 'in_2fa_recovery_mode': False}), 200
     
     # Check if user is in 2FA recovery mode (forced new 2FA setup)
-    in_recovery = session.get('2fa_recovery_mode', False)
+    in_recovery = session.get(SessionKeys.IN_2FA_RECOVERY_MODE, False)
     
     return jsonify({
         'id': user['id'], 
@@ -101,43 +110,26 @@ def get_conversation(user_id):
     Loads all messages (sent and received), marks partner messages as read.
     Returns encrypted_content and session_key_encrypted for frontend decryption.
     """
-    db = get_db()
     my_id = get_current_user_id()
 
     # Mark all messages from this user as read
     try:
-        db.execute(
-            'UPDATE messages SET is_read = 1 WHERE sender_id = ? AND recipient_id = ? AND is_read = 0',
-            (user_id, my_id)
-        )
-        db.commit()
-    except Exception:
-        pass
+        MessageQueries.mark_as_read(user_id, my_id)
+    except Exception as e:
+        current_app.logger.error('Error marking messages as read: %s', str(e))
 
     # Retrieve all messages between current user and this user
-    messages = db.execute('''
-        SELECT m.id, m.sender_id, m.recipient_id, m.encrypted_content, m.session_key_encrypted, m.signature, m.is_read, u.username as sender
-        FROM messages m
-        JOIN users u ON m.sender_id = u.id
-        WHERE (m.sender_id = ? AND m.recipient_id = ?)
-           OR (m.sender_id = ? AND m.recipient_id = ?)
-        ORDER BY m.created_at ASC
-    ''', (my_id, user_id, user_id, my_id)).fetchall()
+    messages = MessageQueries.get_conversation(my_id, user_id)
     
     result = []
 
     # Return messages with attachments (data is encrypted - do not sanitize!)
     for m in messages:
         # Retrieve attachments for this message
-        atts = db.execute('SELECT id, filename FROM attachments WHERE message_id = ?', (m['id'],)).fetchall()
+        atts = AttachmentQueries.get_by_message(m['id'])
         attachments = []
         for a in atts:
-            fname = a['filename']
-            try:
-                if fname:
-                    fname = clean_input(fname)
-            except Exception:
-                pass
+            fname = sanitize_filename(a['filename'])
             attachments.append({'id': a['id'], 'filename': fname})
         
         # Return encrypted content as-is (do not sanitize encrypted data!)
@@ -158,10 +150,9 @@ def get_conversation(user_id):
 @messages_bp.route('/api/messages/send', methods=['POST'])
 def send_message():
     try:
-        db = get_db()
         my_id = get_current_user_id()
         if my_id is None:
-            return jsonify({'error': 'Unauthorized'}), 401
+            return jsonify({'error': ERROR_UNAUTHORIZED}), 401
 
         # Support both JSON and multipart/form-data (for attachments)
         if request.content_type and request.content_type.startswith('multipart/form-data'):
@@ -185,50 +176,35 @@ def send_message():
             return jsonify({'error': 'Invalid recipient.'}), 400
 
         # Verify recipient exists
-        recipient = db.execute('SELECT id FROM users WHERE id = ?', (recipient_id,)).fetchone()
-        if not recipient:
+        if not UserQueries.get_by_id(recipient_id):
             return jsonify({'error': 'Recipient does not exist.'}), 400
        
-
         # Insert message into database (already encrypted from frontend)
-        cur = db.execute(
-            'INSERT INTO messages (sender_id, recipient_id, encrypted_content, session_key_encrypted, signature) VALUES (?, ?, ?, ?, ?)',
-            (my_id, recipient_id, encrypted_content, session_key_encrypted, signature)
-        )
-        msg_id = cur.lastrowid
-        db.commit()
+        msg_id = MessageQueries.send(my_id, recipient_id, encrypted_content, session_key_encrypted, signature)
 
         # Handle file attachments if any (multipart)
         if request.files:
             files = request.files.getlist('attachments')
             for f in files:
-                filename = f.filename
-                try:
-                    if filename:
-                        filename = clean_input(filename)
-                except Exception:
-                    pass
+                filename = sanitize_filename(f.filename)
                 data = f.read()
-                # limit file size (25MB)
-                if len(data) > 25 * 1024 * 1024:
+                # limit file size
+                if len(data) > MAX_FILE_SIZE_BYTES:
                     continue
-                db.execute('INSERT INTO attachments (message_id, filename, encrypted_data) VALUES (?, ?, ?)', (msg_id, filename, data))
-            db.commit()
+                AttachmentQueries.add(msg_id, filename, data)
 
         return jsonify({'message': 'Sent.', 'id': msg_id}), 201
     except Exception as e:
+        current_app.logger.error('Error sending message: %s', str(e))
         return jsonify({'error': 'Server error', 'details': str(e)}), 500
 
 
-
-# Delete a message
 
 # Get public key for a user
 @messages_bp.route('/api/users/<int:user_id>/public-key', methods=['GET'])
 def get_user_public_key_route(user_id):
     """Retrieve RSA public key for specified user."""
-    db = get_db()
-    user = db.execute('SELECT public_key FROM users WHERE id = ?', (user_id,)).fetchone()
+    user = UserQueries.get_by_id(user_id)
     
     if not user or not user['public_key']:
         return jsonify({'error': 'Public key not found.'}), 404
@@ -236,32 +212,33 @@ def get_user_public_key_route(user_id):
     return jsonify({'public_key': user['public_key']}), 200
 
 
+
+# Delete a message
 @messages_bp.route('/api/messages/<int:msg_id>', methods=['DELETE'])
 def delete_message(msg_id):
     """Delete a message if requester is sender or recipient."""
-    db = get_db()
     my_id = get_current_user_id()
     
-    has_permission, result, status_code = check_message_permission(my_id, msg_id, db)
+    has_permission, result, status_code = check_message_permission(my_id, msg_id)
     if not has_permission:
         return jsonify(result), status_code
     
-    db.execute('DELETE FROM messages WHERE id = ?', (msg_id,))
-    db.commit()
+    MessageQueries.delete(msg_id)
     return '', 204
 
 
 
+
+# Download attachment
 @messages_bp.route('/api/attachments/<int:att_id>', methods=['GET'])
 def download_attachment(att_id):
-    db = get_db()
     my_id = get_current_user_id()
     
-    att = db.execute('SELECT message_id, filename, encrypted_data FROM attachments WHERE id = ?', (att_id,)).fetchone()
+    att = AttachmentQueries.get_by_id(att_id)
     if not att:
         return jsonify({'error': 'Attachment not found'}), 404
     
-    has_permission, _, status_code = check_message_permission(my_id, att['message_id'], db)
+    has_permission, _, status_code = check_message_permission(my_id, att['message_id'])
     if not has_permission:
         return jsonify({'error': 'No permission'}), status_code
     

@@ -1,5 +1,4 @@
 from flask import Blueprint, request, jsonify, g, session, make_response, current_app
-from db import get_db
 from sanitize import clean_input
 from argon2 import PasswordHasher
 from argon2.low_level import hash_secret_raw, Type
@@ -16,20 +15,26 @@ import base64
 import glob
 import sqlite3
 
-auth_bp = Blueprint('auth', __name__)
-ph = PasswordHasher()  # Argon2id hasher dla password_hash
+# import files from this project
+from constants import *
+from session_keys import SessionKeys
+from db_queries import UserQueries, LoginAttemptQueries, RecoveryCodeQueries
+from helpers import cleanup_qr_file, cleanup_qr_files_for_user, get_block_status, apply_failed_attempt_delay
 
-# ========== PASSWORD VALIDATION ==========
+auth_bp = Blueprint('auth', __name__)
+ph = PasswordHasher()  # Argon2id for password_hash
+
+# PASSWORD VALIDATION 
 
 def is_strong_password(password):
     """
-    Walidacja siły hasła:
-    - Minimum 12 znaków
-    - Przynajmniej 1 wielka litera
-    - Przynajmniej 1 mała litera
-    - Przynajmniej 1 cyfra
+    Validate password strength:
+    - Minimum 12 characters (MIN_PASSWORD_LENGTH)
+    - At least 1 uppercase letter
+    - At least 1 lowercase letter
+    - At least 1 digit
     """
-    if len(password) < 12:
+    if len(password) < MIN_PASSWORD_LENGTH:
         return False
     if not re.search(r'[A-Z]', password):
         return False
@@ -40,7 +45,7 @@ def is_strong_password(password):
     return True
 
 
-# ========== ENCRYPTION HELPERS ==========
+# ENCRYPTION HELPERS
 
 def generate_rsa_keypair():
     """Generate RSA 2048-bit key pair"""
@@ -111,8 +116,7 @@ def decrypt_private_key(encrypted_key_str, password, salt):
         return None
 
 
-# ========== HELPER FUNCTIONS ==========
-
+# HELPERS FUNCTIONS 
 def user_has_2fa_enabled(user):
     """Check if user has 2FA configured (skip for example users)"""
     if not user:
@@ -141,125 +145,38 @@ def verify_totp_code(totp_secret, code):
 def record_login_attempt(username, success):
     """Log login attempt to database"""
     try:
-        db = get_db()
-        db.execute('INSERT INTO login_attempts (username, success) VALUES (?, ?)', (username, success))
-        db.commit()
-    except Exception:
-        pass
+        LoginAttemptQueries.record(username, success)
+    except Exception as e:
+        current_app.logger.error('Failed to record login attempt: %s', str(e))
 
 
 def reset_failed_attempts(username):
     """Reset failed login attempts after successful login"""
     try:
-        db = get_db()
-        # Clear old failed attempts for this user
-        db.execute('DELETE FROM login_attempts WHERE username = ? AND success = 0', (username,))
-        db.commit()
-    except Exception:
-        pass
-
-
-def apply_failed_attempt_delay(failed_count):
-    """Apply progressive delay on failed login attempts"""
-    # Increase delay based on number of failed attempts
-    if failed_count >= 3:
-        backoff = 1.0  # 1 second delay after 3+ attempts
-    else:
-        backoff = 0.5  # 0.5 second delay before
-    time.sleep(backoff)
-
-
-def get_block_status(username):
-    """Check if user is blocked and return remaining block time in seconds"""
-    failed_count = get_recent_failed_attempts(username)
-    
-    # Second level: 8+ failed attempts -> 30 min block
-    if failed_count >= 8:
-        try:
-            db = get_db()
-            # Get timestamp of 8th failed attempt
-            cur = db.execute(
-                """SELECT timestamp FROM login_attempts 
-                   WHERE username = ? AND success = 0 
-                   ORDER BY timestamp DESC LIMIT 1""",
-                (username,)
-            ).fetchone()
-            
-            if cur:
-                from datetime import datetime, timedelta
-                last_attempt = datetime.fromisoformat(cur['timestamp'].replace('Z', '+00:00') if 'Z' in cur['timestamp'] else cur['timestamp'])
-                block_duration = timedelta(minutes=30)
-                unblock_time = last_attempt + block_duration
-                now = datetime.now()
-                
-                remaining = int((unblock_time - now).total_seconds())
-                if remaining > 0:
-                    return True, remaining, 'long'
-        except Exception:
-            pass
-    
-    # First level: 5-7 failed attempts -> 5 min block
-    if failed_count >= 5:
-        try:
-            db = get_db()
-            cur = db.execute(
-                """SELECT timestamp FROM login_attempts 
-                   WHERE username = ? AND success = 0 
-                   ORDER BY timestamp DESC LIMIT 1""",
-                (username,)
-            ).fetchone()
-            
-            if cur:
-                from datetime import datetime, timedelta
-                last_attempt = datetime.fromisoformat(cur['timestamp'].replace('Z', '+00:00') if 'Z' in cur['timestamp'] else cur['timestamp'])
-                block_duration = timedelta(minutes=5)
-                unblock_time = last_attempt + block_duration
-                now = datetime.now()
-                
-                remaining = int((unblock_time - now).total_seconds())
-                if remaining > 0:
-                    return True, remaining, 'short'
-        except Exception:
-            pass
-    
-    return False, 0, None
-
-
-def get_recent_failed_attempts(username):
-    """Get count of recent failed login attempts within last 30 minutes"""
-    try:
-        db = get_db()
-        WINDOW = "-30 minutes"
-        
-        cur = db.execute(
-            "SELECT COUNT(*) as c FROM login_attempts WHERE username = ? AND success = 0 AND timestamp > datetime('now', ?)",
-            (username, WINDOW)
-        ).fetchone()
-        
-        return cur['c'] if cur is not None else 0
-    except Exception:
-        return 0
+        LoginAttemptQueries.clear_failed_attempts(username)
+    except Exception as e:
+        current_app.logger.error('Failed to reset login attempts: %s', str(e))
 
 
 def check_rate_limit(username):
     """Check if user has exceeded login attempt limit with progressive blocking"""
-    failed_count = get_recent_failed_attempts(username)
+    is_blocked, remaining_seconds, block_type = get_block_status(username)
     
-    # Second level: 3+ failed attempts after first block (8+ total)
-    if failed_count >= 8:
-        # Block for 30 minutes (1800 seconds)
-        resp = make_response(jsonify({'error': 'Zbyt wiele nieudanych prób logowania. Konto zablokowane na 30 minut.'}), 429)
-        resp.headers['Retry-After'] = str(30 * 60)
-        return resp, failed_count
+    if is_blocked:
+        if block_type == 'long':
+            # Block for 30 minutes
+            error_msg = ERROR_TOO_MANY_ATTEMPTS_LONG
+            retry_after = RATE_LIMIT_LONG_DURATION_MIN * 60
+        else:
+            # Block for 5 minutes
+            error_msg = ERROR_TOO_MANY_ATTEMPTS_SHORT
+            retry_after = RATE_LIMIT_SHORT_DURATION_MIN * 60
+        
+        resp = make_response(jsonify({'error': error_msg}), 429)
+        resp.headers['Retry-After'] = str(retry_after)
+        return resp
     
-    # First level: 5+ failed attempts
-    if failed_count >= 5:
-        # Block for 5 minutes (300 seconds)
-        resp = make_response(jsonify({'error': 'Zbyt wiele nieudanych prób logowania. Spróbuj za 5 minut.'}), 429)
-        resp.headers['Retry-After'] = str(5 * 60)
-        return resp, failed_count
-    
-    return None, failed_count
+    return None
 
 
 def verify_password(user, password):
@@ -269,7 +186,8 @@ def verify_password(user, password):
     try:
         ph.verify(user['password_hash'], password)
         return True
-    except Exception:
+    except Exception as e:
+        current_app.logger.debug('Password verification failed: %s', str(e))
         return False
 
 
@@ -277,35 +195,25 @@ def complete_2fa_login(user):
     """Complete login after 2FA verification"""
     try:
         username = user['username']
-        session.pop('pre_2fa_user_id', None)
-        session.pop('pre_2fa_password', None)
-        session['user_id'] = user['id']
-        session['2fa_verified'] = True
-        db = get_db()
-        db.execute('UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE id = ?', (user['id'],))
-        db.commit()
+        session.pop(SessionKeys.PRE_2FA_USER_ID, None)
+        session.pop(SessionKeys.PRE_2FA_PASSWORD, None)
+        session[SessionKeys.USER_ID] = user['id']
+        session[SessionKeys.TWO_FA_VERIFIED] = True
+        UserQueries.update_last_login(user['id'])
         
         # Reset failed login attempts after successful login
         reset_failed_attempts(username)
         
-        # Cleanup temporary QR files
-        try:
-            qr_dir = os.path.join(os.path.dirname(__file__), 'static', 'qrs')
-            pattern = os.path.join(qr_dir, f"{user['id']}_*.png")
-            for p in glob.glob(pattern):
-                try:
-                    os.remove(p)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-    except Exception:
-        pass
-    
-    return jsonify({'message': 'Weryfikacja 2FA zakończona pomyślnie.', 'id': user['id']}), 200
+        # Cleanup temporary QR files for this user
+        cleanup_qr_files_for_user(user['id'])
+        
+        return jsonify({'message': MSG_2FA_VERIFICATION_SUCCESS, 'id': user['id']}), 200
+    except Exception as e:
+        current_app.logger.error('Error in complete_2fa_login: %s', str(e))
+        return jsonify({'error': 'Błąd podczas logowania.'}), 500
 
 
-# ========== REGISTRATION ==========
+# REGISTRATION 
 
 def generate_totp_qr(totp_secret, email, username):
     """Generate TOTP QR code and return as data URL + file path"""
@@ -314,7 +222,7 @@ def generate_totp_qr(totp_secret, email, username):
         # This is a standard format recognized by authenticator apps (Google Authenticator, Authy, etc.)
         provisioning_uri = pyotp.TOTP(totp_secret).provisioning_uri(
             name=email or username, 
-            issuer_name='Messenger'
+            issuer_name='Messenger_Projekt'
         )
     except Exception:
         return None, None, None
@@ -358,33 +266,21 @@ def register():
     if not username or not email or not password:
         return jsonify({'error': 'Wszystkie pola są wymagane.'}), 400
     
-    if len(username) < 3 or len(username) > 32 or not re.match(r'^[a-zA-Z0-9_.-]+$', username):
-        return jsonify({'error': 'Nieprawidłowa nazwa użytkownika.'}), 400
+    if len(username) < USERNAME_MIN_LENGTH or len(username) > USERNAME_MAX_LENGTH or not re.match(r'^[a-zA-Z0-9_.-]+$', username):
+        return jsonify({'error': ERROR_INVALID_USERNAME}), 400
     
     if not re.match(r'^\S+@\S+\.\S+$', email):
-        return jsonify({'error': 'Nieprawidłowy email.'}), 400
+        return jsonify({'error': ERROR_INVALID_EMAIL}), 400
     
     if not is_strong_password(password):
-        return jsonify({'error': 'Hasło musi mieć min. 12 znaków, dużą i małą literę oraz cyfrę.'}), 400
+        return jsonify({'error': ERROR_WEAK_PASSWORD}), 400
 
     # CHECK IF USERNAME OR EMAIL ALREADY EXIST (before 2FA setup)
-    db = get_db()
-    existing_user = db.execute(
-        'SELECT id FROM users WHERE username = ? OR email = ?',
-        (username, email)
-    ).fetchone()
+    if UserQueries.username_exists(username):
+        return jsonify({'error': ERROR_USERNAME_EXISTS}), 409
     
-    if existing_user:
-        # Check which one is taken
-        existing_by_username = db.execute(
-            'SELECT id FROM users WHERE username = ?',
-            (username,)
-        ).fetchone()
-        
-        if existing_by_username:
-            return jsonify({'error': 'Nazwa użytkownika już istnieje.'}), 409
-        else:
-            return jsonify({'error': 'Email już istnieje.'}), 409
+    if UserQueries.email_exists(email):
+        return jsonify({'error': ERROR_EMAIL_EXISTS}), 409
 
     try:
         # Hash password and generate encryption keys
@@ -404,7 +300,7 @@ def register():
         recovery_codes = generate_recovery_codes(10)
         
         # Store in session
-        session['reg_pending'] = {
+        session[SessionKeys.REG_PENDING] = {
             'username': username,
             'email': email,
             'password_hash': password_hash,
@@ -417,7 +313,7 @@ def register():
         }
         
         return jsonify({
-            'message': 'Rejestracja przygotowana. Dokończ konfigurację 2FA.',
+            'message': MSG_REGISTRATION_PREPARED,
             'provisioning_uri': provisioning_uri,
             'provisioning_qr': provisioning_qr,
             'provisioning_qr_path': provisioning_qr_path,
@@ -425,15 +321,14 @@ def register():
         }), 201
     
     except Exception as e:
-        try:
-            current_app.logger.warning('Registration error: %s', str(e))
-        except Exception:
-            pass
-        return jsonify({'error': 'Rejestracja nie powiodła się.'}), 500
+        current_app.logger.warning('Registration error: %s', str(e))
+        return jsonify({'error': ERROR_REGISTRATION_FAILED}), 500
 
 
-# ========== LOGIN ==========
+# LOGIN
 
+
+# Check login block status
 @auth_bp.route('/api/check-login-block', methods=['POST'])
 def check_login_block():
     """Check if user account is blocked due to failed login attempts"""
@@ -446,7 +341,7 @@ def check_login_block():
     is_blocked, remaining_seconds, block_type = get_block_status(username)
     
     if is_blocked:
-        block_message = 'Konto zablokowane na 30 minut.' if block_type == 'long' else 'Spróbuj za 5 minut.'
+        block_message = ERROR_TOO_MANY_ATTEMPTS_LONG if block_type == 'long' else ERROR_TOO_MANY_ATTEMPTS_SHORT
         return jsonify({
             'blocked': True, 
             'remaining': remaining_seconds,
@@ -464,50 +359,46 @@ def login():
     password = data.get('password', '')
     
     if not username or not password:
-        return jsonify({'error': 'Nieprawidłowe dane logowania.'}), 401
+        return jsonify({'error': ERROR_INVALID_CREDENTIALS}), 401
     
     # Check rate limit
-    rate_limit_error, failed_count = check_rate_limit(username)
+    rate_limit_error = check_rate_limit(username)
     if rate_limit_error:
         return rate_limit_error
     
-    db = get_db()
-    
     # Find user
-    user = db.execute(
-        'SELECT * FROM users WHERE username = ? OR email = ?', (username, username)
-    ).fetchone()
+    user = UserQueries.get_by_username_or_email(username)
     
     # Verify password
     password_valid = verify_password(user, password)
     
     if not password_valid:
         record_login_attempt(username, 0)
+        failed_count = LoginAttemptQueries.get_recent_failed_count(username, RATE_LIMIT_WINDOW_MIN)
         apply_failed_attempt_delay(failed_count)
-        return jsonify({'error': 'Nieprawidłowe dane logowania.'}), 401
+        return jsonify({'error': ERROR_INVALID_CREDENTIALS}), 401
     
     # Password valid
     record_login_attempt(username, 1)
     
-    # Check if user has 2FA enabled
+    # Check if user has 2FA enabled (disabled for test users)
     if user_has_2fa_enabled(user):
         # Require 2FA verification
-        session['pre_2fa_user_id'] = user['id']
-        return jsonify({'message': 'Wymagana weryfikacja 2FA.', '2fa_required': True}), 200
+        session[SessionKeys.PRE_2FA_USER_ID] = user['id']
+        return jsonify({'message': MSG_LOGIN_REQUIRES_2FA, '2fa_required': True}), 200
     else:
         # Complete login for user without 2FA
         try:
-            session['user_id'] = user['id']
-            db.execute('UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE id = ?', (user['id'],))
-            db.commit()
+            session[SessionKeys.USER_ID] = user['id']
+            UserQueries.update_last_login(user['id'])
             # Reset failed login attempts after successful login
             reset_failed_attempts(username)
-        except Exception:
-            pass
-        return jsonify({'message': 'Zalogowano pomyślnie.', 'id': user['id']}), 200
+        except Exception as e:
+            current_app.logger.error('Error during login: %s', str(e))
+        return jsonify({'message': MSG_LOGIN_SUCCESS, 'id': user['id']}), 200
 
 
-# ========== PASSWORD RESET ==========
+# PASSWORD RESET
 
 @auth_bp.route('/api/forgot-password', methods=['POST'])
 def forgot_password():
@@ -518,16 +409,15 @@ def forgot_password():
     if not email:
         return jsonify({'error': 'Podaj email.'}), 400
     
-    db = get_db()
-    user = db.execute('SELECT id, username FROM users WHERE email = ?', (email,)).fetchone()
+    user = UserQueries.get_by_email(email)
     
     if not user:
         # Don't reveal if email exists (security)
-        return jsonify({'message': 'Jeśli email istnieje, otrzymasz instrukcje.'}), 200
+        return jsonify({'message': MSG_PASSWORD_RESET_LINK_SENT}), 200
     
     # Store in session for recovery code verification
-    session['password_reset_user_id'] = user['id']
-    session['password_reset_email'] = email
+    session[SessionKeys.PASSWORD_RESET_USER_ID] = user['id']
+    session[SessionKeys.PASSWORD_RESET_EMAIL] = email
     
     return jsonify({
         'message': 'Sprawdź swoją skrzynkę odbioczą.',
@@ -542,39 +432,33 @@ def verify_recovery_for_password_reset():
     recovery_code = clean_input(data.get('recovery_code', '').strip())
     
     # Get user from session
-    user_id = session.get('password_reset_user_id')
+    user_id = session.get(SessionKeys.PASSWORD_RESET_USER_ID)
     if not user_id:
         return jsonify({'error': 'Sesja wygasła. Zacznij od nowa.'}), 401
     
-    db = get_db()
-    user = db.execute('SELECT id, username FROM users WHERE id = ?', (user_id,)).fetchone()
+    user = UserQueries.get_by_id(user_id)
     if not user:
-        return jsonify({'error': 'Użytkownik nie znaleziony.'}), 404
+        return jsonify({'error': ERROR_USER_NOT_FOUND}), 404
     
     # Verify recovery code
     from db import verify_recovery_code, hash_recovery_code
-    cursor = db.execute(
-        '''SELECT code_hash FROM two_fa_recovery_codes 
-           WHERE user_id = ? AND used = FALSE''',
-        (user_id,)
-    ).fetchall()
+    recovery_codes = RecoveryCodeQueries.get_all_for_user(user_id)
     
     code_valid = False
-    for row in cursor:
+    for row in recovery_codes:
         if verify_recovery_code(recovery_code, row['code_hash']):
             code_valid = True
             break
     
     if not code_valid:
-        return jsonify({'error': 'Nieprawidłowy kod odzyskiwania.'}), 401
+        return jsonify({'error': ERROR_INVALID_RECOVERY_CODE}), 401
     
     # Mark recovery code as used
-    from db import mark_recovery_code_used
-    mark_recovery_code_used(user_id, recovery_code)
+    RecoveryCodeQueries.mark_as_used(user_id, recovery_code)
     
     # Store in session for password change
-    session['can_reset_password'] = True
-    session['reset_password_user_id'] = user_id
+    session[SessionKeys.CAN_RESET_PASSWORD] = True
+    session[SessionKeys.PASSWORD_RESET_USER_ID] = user_id
     
     return jsonify({'message': 'Kod zweryfikowany. Teraz ustaw nowe hasło.'}), 200
 
@@ -583,10 +467,10 @@ def verify_recovery_for_password_reset():
 def reset_password():
     """Reset password after recovery code verification"""
     # Check if user has verified recovery code
-    if not session.get('can_reset_password'):
+    if not session.get(SessionKeys.CAN_RESET_PASSWORD):
         return jsonify({'error': 'Musisz najpierw zweryfikować kod odzyskiwania.'}), 401
     
-    user_id = session.get('reset_password_user_id')
+    user_id = session.get(SessionKeys.PASSWORD_RESET_USER_ID)
     if not user_id:
         return jsonify({'error': 'Sesja wygasła.'}), 401
     
@@ -598,17 +482,16 @@ def reset_password():
         return jsonify({'error': 'Oba pola są wymagane.'}), 400
     
     if new_password != confirm_password:
-        return jsonify({'error': 'Hasła się nie zgadzają.'}), 400
+        return jsonify({'error': ERROR_PASSWORD_MISMATCH}), 400
     
     if not is_strong_password(new_password):
-        return jsonify({'error': 'Hasło musi mieć minimum 12 znaków, wielką literę, małą literę i cyfrę.'}), 400
+        return jsonify({'error': ERROR_WEAK_PASSWORD}), 400
     
     # Update password in database
     try:
-        db = get_db()
-        user = db.execute('SELECT * FROM users WHERE id = ?', (user_id,)).fetchone()
+        user = UserQueries.get_by_id(user_id)
         if not user:
-            return jsonify({'error': 'Użytkownik nie znaleziony.'}), 404
+            return jsonify({'error': ERROR_USER_NOT_FOUND}), 404
         
         # Hash new password
         new_password_hash = ph.hash(new_password)
@@ -621,53 +504,48 @@ def reset_password():
         private_key_encrypted = encrypt_private_key(private_key, new_password, salt)
         
         # Update password and re-encrypted private key
-        db.execute(
-            'UPDATE users SET password_hash = ?, public_key = ?, private_key_encrypted = ? WHERE id = ?',
-            (new_password_hash, public_key, private_key_encrypted, user_id)
-        )
-        db.commit()
+        UserQueries.update_keys_and_password(user_id, new_password_hash, public_key, private_key_encrypted)
         
         # Clear session
-        session.pop('can_reset_password', None)
-        session.pop('reset_password_user_id', None)
-        session.pop('password_reset_user_id', None)
-        session.pop('password_reset_email', None)
+        session.pop(SessionKeys.CAN_RESET_PASSWORD, None)
+        session.pop(SessionKeys.PASSWORD_RESET_USER_ID, None)
+        session.pop(SessionKeys.PASSWORD_RESET_EMAIL, None)
         
-        return jsonify({'message': 'Hasło zostało zmienione. Zaloguj się nowym hasłem.'}), 200
+        return jsonify({'message': MSG_PASSWORD_RESET_SUCCESS}), 200
     except Exception as e:
+        current_app.logger.error('Error resetting password: %s', str(e))
         return jsonify({'error': 'Błąd podczas zmiany hasła.'}), 500
 
 
-# ========== 2FA VERIFICATION ==========
+# 2FA VERIFICATION
 
 @auth_bp.route('/api/verify-2fa', methods=['POST'])
 def verify_2fa():
     data = request.get_json() or {}
     code = str(data.get('code', '')).strip()
-    db = get_db()
 
     # Case A: finishing pending registration
-    if session.get('reg_pending') is not None:
-        return _verify_2fa_registration(code, db)
+    if session.get(SessionKeys.REG_PENDING) is not None:
+        return _verify_2fa_registration(code)
     
     # Case B: existing user finishing login 2FA
-    if session.get('pre_2fa_user_id') is not None:
-        return _verify_2fa_login(code, db)
+    if session.get(SessionKeys.PRE_2FA_USER_ID) is not None:
+        return _verify_2fa_login(code)
     
     # No valid session state
-    return jsonify({'error': 'Weryfikacja 2FA nie powiodła się.'}), 401
+    return jsonify({'error': ERROR_2FA_FAILED}), 401
 
 
-def _verify_2fa_registration(code, db):
+def _verify_2fa_registration(code):
     """Handle 2FA verification during registration"""
-    reg = session.get('reg_pending')
+    reg = session.get(SessionKeys.REG_PENDING)
     
     if not code:
-        return jsonify({'error': 'Weryfikacja 2FA nie powiodła się.'}), 401
+        return jsonify({'error': ERROR_2FA_FAILED}), 401
     
     totp_secret = reg.get('totp_secret')
     if not totp_secret:
-        return jsonify({'error': 'Weryfikacja 2FA nie powiodła się.'}), 401
+        return jsonify({'error': ERROR_2FA_FAILED}), 401
     
     # Verify TOTP code
     ok = verify_totp_code(totp_secret, code)
@@ -675,75 +553,60 @@ def _verify_2fa_registration(code, db):
     
     if not ok:
         time.sleep(0.5)
-        return jsonify({'error': 'Weryfikacja 2FA nie powiodła się.'}), 401
+        return jsonify({'error': ERROR_2FA_FAILED}), 401
 
     # Insert user into database
     try:
         salt_bytes = base64.b64decode(reg.get('salt_b64')) if reg.get('salt_b64') else os.urandom(16)
-        cur = db.execute(
-            'INSERT INTO users (username, email, password_hash, salt, public_key, private_key_encrypted, totp_secret) VALUES (?, ?, ?, ?, ?, ?, ?)',
-            (reg.get('username'), reg.get('email'), reg.get('password_hash'), salt_bytes, reg.get('public_key'), reg.get('private_key_encrypted'), reg.get('totp_secret'))
+        new_id = UserQueries.create_user(
+            reg.get('username'), reg.get('email'), reg.get('password_hash'),
+            salt_bytes, reg.get('public_key'), reg.get('private_key_encrypted'),
+            reg.get('totp_secret')
         )
-        db.commit()
-        new_id = cur.lastrowid
         
         # Use recovery codes from session (generated in /api/register)
         recovery_codes = reg.get('recovery_codes', [])
-        from db import save_recovery_codes
-        save_recovery_codes(new_id, recovery_codes)
+        RecoveryCodeQueries.save_codes(new_id, recovery_codes)
 
     except sqlite3.IntegrityError as e:
         m = str(e)
         try:
             if 'users.username' in m:
-                return jsonify({'error': 'Nazwa użytkownika już istnieje.'}), 409
+                return jsonify({'error': ERROR_USERNAME_EXISTS}), 409
             if 'users.email' in m:
-                return jsonify({'error': 'Email już istnieje.'}), 409
+                return jsonify({'error': ERROR_EMAIL_EXISTS}), 409
         except Exception:
             pass
-        return jsonify({'error': 'Rejestracja nie powiodła się.'}), 409
-    except Exception:
-        return jsonify({'error': 'Rejestracja nie powiodła się.'}), 500
+        return jsonify({'error': ERROR_REGISTRATION_FAILED}), 409
+    except Exception as e:
+        current_app.logger.error('Registration error: %s', str(e))
+        return jsonify({'error': ERROR_REGISTRATION_FAILED}), 500
 
     # Get recovery codes from session before clearing it
     recovery_codes = reg.get('recovery_codes', [])
     
-    # Finalize session
-    session.pop('reg_pending', None)
-    session['user_id'] = new_id
-    session['2fa_verified'] = True
+    # Finalize session - only clear reg pending (don't create session, user needs to login)
+    session.pop(SessionKeys.REG_PENDING, None)
 
     # Cleanup QR file from registration
-    try:
-        qr_path = reg.get('provisioning_qr_path')
-        if qr_path and qr_path.startswith('/static/qrs/'):
-            # Build correct path: go up from backend/ to parent, then into static/
-            fs_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), qr_path.lstrip('/'))
-            if os.path.exists(fs_path):
-                try:
-                    os.remove(fs_path)
-                except Exception:
-                    pass
-    except Exception:
-        pass
+    cleanup_qr_file(reg.get('provisioning_qr_path'))
 
     return jsonify({
-        'message': 'Rejestracja zakończona pomyślnie.',
-        'id': new_id,
+        'message': MSG_REGISTRATION_SUCCESS,
         'recovery_codes': recovery_codes
     }), 201
 
 
-def _verify_2fa_login(code, db):
+def _verify_2fa_login(code):
     """Handle 2FA verification during login"""
-    pre_id = session.get('pre_2fa_user_id')
+    pre_id = session.get(SessionKeys.PRE_2FA_USER_ID)
     
     if not pre_id or not code:
-        return jsonify({'error': 'Weryfikacja 2FA nie powiodła się.'}), 401
+        return jsonify({'error': ERROR_2FA_FAILED}), 401
     
-    user = db.execute('SELECT * FROM users WHERE id = ?', (pre_id,)).fetchone()
+    user = UserQueries.get_by_id(pre_id)
     if not user:
-        return jsonify({'error': 'Weryfikacja 2FA nie powiodła się.'}), 401
+        return jsonify({'error': ERROR_2FA_FAILED}), 401
 
     # Get TOTP secret
     try:
@@ -754,7 +617,7 @@ def _verify_2fa_login(code, db):
     # Verify TOTP is configured
     if not totp_secret or totp_secret == 'TOTP_SECRET_PLACEHOLDER':
         record_login_attempt(user['username'], 0)
-        return jsonify({'error': 'Weryfikacja 2FA nie powiodła się.'}), 401
+        return jsonify({'error': ERROR_2FA_FAILED}), 401
 
     # Verify TOTP code
     ok = verify_totp_code(totp_secret, code)
@@ -762,34 +625,33 @@ def _verify_2fa_login(code, db):
     
     if not ok:
         time.sleep(0.5)
-        return jsonify({'error': 'Weryfikacja 2FA nie powiodła się.'}), 401
+        return jsonify({'error': ERROR_2FA_FAILED}), 401
 
     # Complete login
-    password = session.get('pre_2fa_password', '')
     return complete_2fa_login(user)
 
 
-# ========== PRIVATE KEY RETRIEVAL ==========
+# PRIVATE KEY RETRIEVAL 
 @auth_bp.route('/api/get-private-key', methods=['POST'])
 def get_private_key():
     """Get decrypted private key for logged-in user"""
     data = request.get_json() or {}
     password = data.get('password', '')
     
-    user_id = session.get('user_id')
+    user_id = session.get(SessionKeys.USER_ID)
     if not user_id:
-        return jsonify({'error': 'Nieautoryzowany.'}), 401
+        return jsonify({'error': ERROR_UNAUTHORIZED}), 401
     
-    db = get_db()
-    user = db.execute('SELECT * FROM users WHERE id = ?', (user_id,)).fetchone()
+    user = UserQueries.get_by_id(user_id)
     
     if not user:
-        return jsonify({'error': 'Użytkownik nie znaleziony.'}), 404
+        return jsonify({'error': ERROR_USER_NOT_FOUND}), 404
     
     # Verify password
     try:
         ph.verify(user['password_hash'], password)
-    except Exception:
+    except Exception as e:
+        current_app.logger.debug('Password verification failed for private key: %s', str(e))
         return jsonify({'error': 'Nieprawidłowe hasło.'}), 401
     
     # Decrypt private key
@@ -806,20 +668,17 @@ def get_private_key():
         current_app.logger.error('Error decrypting private key: %s', str(e))
         return jsonify({'error': 'Nie udało się odszyfrować klucza prywatnego.'}), 500
 
-
-# ========== LOGOUT ==========
-
 @auth_bp.route('/api/logout', methods=['POST'])
 def logout():
     try:
-        session.pop('user_id', None)
-        session.pop('pre_2fa_user_id', None)
-        session.pop('reg_pending', None)
-        session.pop('2fa_verified', None)
-        session.pop('2fa_recovery_mode', None)
-    except Exception:
-        pass
-    return jsonify({'message': 'Wylogowano.'}), 200
+        session.pop(SessionKeys.USER_ID, None)
+        session.pop(SessionKeys.PRE_2FA_USER_ID, None)
+        session.pop(SessionKeys.REG_PENDING, None)
+        session.pop(SessionKeys.TWO_FA_VERIFIED, None)
+        session.pop(SessionKeys.IN_2FA_RECOVERY_MODE, None)
+    except Exception as e:
+        current_app.logger.error('Error during logout: %s', str(e))
+    return jsonify({'message': MSG_LOGOUT_SUCCESS}), 200
 
 
 # ========== 2FA RECOVERY - RECOVERY CODE VERIFICATION ==========
@@ -828,13 +687,14 @@ def logout():
 def recovery_code_verification():
     """
     Verify recovery code when user lost access to 2FA app.
-    Flow:
+    
     1. User is in 2FA verification step (pre_2fa_user_id set)
     2. User provides recovery code instead of TOTP code
-    3. Backend verifies recovery code
-    4. Backend removes 2FA (sets totp_secret to NULL)
-    5. Backend creates session
-    6. Frontend shows: FORCED 2FA SETUP (user must set up new 2FA immediately)
+    3. Verification of recovery code
+    4. Removing token 2FA 
+    5. New session
+    6. Setting up new 2FA
+    7. Generating new recovery codes
     """
     data = request.get_json() or {}
     email = data.get('email', '').strip().lower()
@@ -843,28 +703,24 @@ def recovery_code_verification():
     if not email or not recovery_code:
         return jsonify({'error': 'Email i recovery code są wymagane.'}), 400
     
-    from db import verify_and_get_user_by_recovery_code, mark_recovery_code_used
-    db = get_db()
-    
     # Verify recovery code and get user
-    user = verify_and_get_user_by_recovery_code(email, recovery_code)
+    user = RecoveryCodeQueries.get_user_by_code(email, recovery_code)
     
     if not user:
         # Security: Don't reveal if email/code is invalid
         time.sleep(0.5)
-        return jsonify({'error': 'Nieprawidłowy kod odzyskiwania lub email.'}), 401
+        return jsonify({'error': ERROR_INVALID_RECOVERY_CODE}), 401
     
     # Recovery code is valid! Mark it as used
-    mark_recovery_code_used(user['id'], recovery_code)
+    RecoveryCodeQueries.mark_as_used(user['id'], recovery_code)
     
     # Remove 2FA (force setup new one) - set to empty string instead of NULL
-    db.execute('UPDATE users SET totp_secret = "" WHERE id = ?', (user['id'],))
-    db.commit()
+    UserQueries.update_totp_secret(user['id'], '')
     
     # Create session
-    session['user_id'] = user['id']
-    session['2fa_verified'] = True
-    session['2fa_recovery_mode'] = True  # ← Flag to force setup new 2FA
+    session[SessionKeys.USER_ID] = user['id']
+    session[SessionKeys.TWO_FA_VERIFIED] = True
+    session[SessionKeys.IN_2FA_RECOVERY_MODE] = True  # ← Flag to force setup new 2FA
     
     return jsonify({
         'success': True,
@@ -873,22 +729,21 @@ def recovery_code_verification():
         'user_id': user['id']
     }), 200
 
-# ========== FORCED 2FA SETUP (after recovery) ==========
+# FORCED 2FA SETUP (after recovery)
 
 @auth_bp.route('/api/setup-2fa-forced', methods=['GET'])
 def setup_2fa_forced():
     """Get 2FA setup info for forced setup after recovery code usage"""
-    user_id = session.get('user_id')
+    user_id = session.get(SessionKeys.USER_ID)
     
     if not user_id:
-        return jsonify({'error': 'Nie jesteś zalogowany'}), 401
+        return jsonify({'error': ERROR_UNAUTHORIZED}), 401
     
     # Get user info for QR generation
-    db = get_db()
-    user = db.execute('SELECT email, username FROM users WHERE id = ?', (user_id,)).fetchone()
+    user = UserQueries.get_by_id(user_id)
     
     if not user:
-        return jsonify({'error': 'Użytkownik nie znaleziony'}), 401
+        return jsonify({'error': ERROR_USER_NOT_FOUND}), 401
     
     # Generate new TOTP secret
     totp_secret = pyotp.random_base32()
@@ -899,8 +754,8 @@ def setup_2fa_forced():
     )
     
     # Store in session temporarily
-    session['_force_2fa_secret'] = totp_secret
-    session['_setup2fa_qr_path'] = provisioning_qr_path
+    session[SessionKeys.FORCE_2FA_SECRET] = totp_secret
+    session[SessionKeys.FORCE_2FA_QR_PATH] = provisioning_qr_path
     
     return jsonify({
         'totp_secret': totp_secret,
@@ -915,15 +770,15 @@ def verify_2fa_forced():
     """Verify and save 2FA setup after recovery code usage"""
     data = request.get_json() or {}
     code = str(data.get('code', '')).strip()
-    user_id = session.get('user_id')
+    user_id = session.get(SessionKeys.USER_ID)
     
     if not user_id:
-        return jsonify({'error': 'Nie jesteś zalogowany'}), 401
+        return jsonify({'error': ERROR_UNAUTHORIZED}), 401
     
     if not code:
         return jsonify({'error': 'Kod jest wymagany'}), 400
     
-    totp_secret = session.get('_force_2fa_secret')
+    totp_secret = session.get(SessionKeys.FORCE_2FA_SECRET)
     if not totp_secret:
         return jsonify({'error': 'Sesja 2FA wygasła'}), 401
     
@@ -932,41 +787,26 @@ def verify_2fa_forced():
         time.sleep(0.5)
         return jsonify({'error': 'Nieprawidłowy kod 2FA'}), 401
     
-    db = get_db()
-    
     # Update user with new TOTP secret
-    db.execute('UPDATE users SET totp_secret = ? WHERE id = ?', (totp_secret, user_id))
-    db.commit()
+    UserQueries.update_totp_secret(user_id, totp_secret)
     
     # Generate new recovery codes
-    from db import generate_recovery_codes, save_recovery_codes
+    from db import generate_recovery_codes
     recovery_codes = generate_recovery_codes(10)
-    save_recovery_codes(user_id, recovery_codes)
+    RecoveryCodeQueries.save_codes(user_id, recovery_codes)
     
     # Cleanup session and QR file
-    qr_path = session.get('_setup2fa_qr_path')
+    qr_path = session.get(SessionKeys.FORCE_2FA_QR_PATH)
     
-    session.pop('_force_2fa_secret', None)
-    session.pop('2fa_recovery_mode', None)
-    session.pop('_setup2fa_qr_path', None)
+    session.pop(SessionKeys.FORCE_2FA_SECRET, None)
+    session.pop(SessionKeys.IN_2FA_RECOVERY_MODE, None)
+    session.pop(SessionKeys.FORCE_2FA_QR_PATH, None)
     
     # Cleanup QR file from forced setup
-    try:
-        if qr_path and qr_path.startswith('/static/qrs/'):
-            # Build correct path: go up from backend/ to parent, then into static/
-            fs_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), qr_path.lstrip('/'))
-            if os.path.exists(fs_path):
-                try:
-                    os.remove(fs_path)
-                except Exception:
-                    pass
-    except Exception:
-        pass
-    except Exception:
-        pass
+    cleanup_qr_file(qr_path)
     
     return jsonify({
         'success': True,
-        'message': 'Nowy 2FA i recovery codes skonfigurowane',
+        'message': MSG_2FA_SETUP_SUCCESS,
         'recovery_codes': recovery_codes
     }), 200
