@@ -126,7 +126,7 @@ function displayRecoveryCodes(data) {
 
 // RECOVERY CODES DOWNLOAD
 
-// Handle recovery codes download as TXT file
+// Handling recovery codes download as TXT file
 function attachDownloadCodesHandler() {
     document.getElementById('downloadRecoveryCodes').onclick = function() {
         const codes = JSON.parse(sessionStorage.getItem('recovery_codes') || '[]');
@@ -136,7 +136,7 @@ function attachDownloadCodesHandler() {
             return;
         }
         
-        // Create TXT file content
+        // TXT file content
         const text = 'KODY ODZYSKIWANIA - MESSENGER\n' +
                     '============================\n' +
                     'Jeśli stracisz dostęp do aplikacji 2FA, użyj jednego z tych kodów.\n' +
