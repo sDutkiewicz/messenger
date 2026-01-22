@@ -24,10 +24,19 @@ function attachRegisterFormHandler() {
     document.getElementById('registerForm').onsubmit = async function(e) {
         e.preventDefault();
         const form = e.target;
+        const password = form.password.value;
+        const confirm_password = form.confirm_password.value;
+        
+        // Check if passwords match
+        if (password !== confirm_password) {
+            showMessage('registerMsg', 'Hasła się nie zgadzają!', 'red');
+            return;
+        }
+        
         const data = {
             username: form.username.value,
             email: form.email.value,
-            password: form.password.value
+            password: password
         };
         
         const res = await fetch('/api/register', {
