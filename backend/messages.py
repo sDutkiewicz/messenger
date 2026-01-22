@@ -2,11 +2,7 @@ from flask import Blueprint, request, jsonify
 from db import get_db
 from flask import session
 from sanitize import clean_input
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.asymmetric import padding
-from cryptography.hazmat.backends import default_backend
 import base64
-import hashlib
 
 
 # Blueprint for message-related routes
@@ -14,11 +10,15 @@ messages_bp = Blueprint('messages', __name__)
 
 
 def get_current_user_id():
-    """Return logged-in user ID from session"""
+    """
+    Return logged-in user ID from session.
+    
+    Demo mode: returns user_id=1 (alice) if not logged in.
+    In production, should return None and endpoints should return 401.
+    """
     user_id = session.get('user_id')
     if user_id is None:
-        # For demo: return 1 (alice) if not logged in
-        return 1
+        return 1  # Demo user - change in production
     return user_id
 
 
@@ -38,7 +38,10 @@ def check_message_permission(user_id, msg_id, db):
 
 
 def get_user_public_key(user_id):
-    """Get public key for user"""
+    """
+    Retrieve user's RSA public key from database.
+    Used for encrypting AES key for message recipients.
+    """
     db = get_db()
     user = db.execute('SELECT public_key FROM users WHERE id = ?', (user_id,)).fetchone()
     
@@ -48,57 +51,43 @@ def get_user_public_key(user_id):
     try:
         from cryptography.hazmat.primitives.serialization import load_pem_public_key
         public_key = load_pem_public_key(
-            user['public_key'].encode(),
-            backend=default_backend()
+            user['public_key'].encode()
         )
         return public_key
     except Exception:
-        pass
-    
-    return None
+        return None
 
 
-def verify_message_signature(encrypted_content, signature, public_key):
-    """Verify message signature with RSA public key"""
-    try:
-        if not signature:
-            return False
-        message_hash = hashlib.sha256(encrypted_content.encode()).digest()
-        signature_bytes = base64.b64decode(signature)
-        public_key.verify(
-            signature_bytes,
-            message_hash,
-            padding.PSS(
-                mgf=padding.MGF1(hashes.SHA256()),
-                salt_length=padding.PSS.MAX_LENGTH
-            ),
-            hashes.SHA256()
-        )
-        return True
-    except Exception:
-        return False
 
-
-@messages_bp.route('/api/users', methods=['GET']) # show list of users
+@messages_bp.route('/api/users', methods=['GET'])
 def list_users():
+    """
+    Pobierz listę wszystkich użytkowników (poza sobą)
+    Używane do wyświetlenia konwersacji w sidebar'ze
+    """
     db = get_db()
     my_id = get_current_user_id()
     users = db.execute('SELECT id, username FROM users WHERE id != ?', (my_id,)).fetchall()
     return jsonify([{'id': u['id'], 'username': u['username']} for u in users])
 
 
-@messages_bp.route('/api/me', methods=['GET']) # get current user info
+@messages_bp.route('/api/me', methods=['GET'])
 def get_me():
-    from flask import session
+    """
+    Pobierz informacje o zalogowanym użytkowniku
+    - ID i username
+    - Czy user jest w 2FA recovery mode (forced 2FA setup)
+    """
     db = get_db()
     my_id = get_current_user_id()
     if my_id is None:
         return jsonify({'id': None, 'username': None, 'in_2fa_recovery_mode': False}), 200
+    
     user = db.execute('SELECT id, username FROM users WHERE id = ?', (my_id,)).fetchone()
     if not user:
         return jsonify({'id': None, 'username': None, 'in_2fa_recovery_mode': False}), 200
     
-    # Check if user is in 2FA recovery mode
+    # Check if user is in 2FA recovery mode (forced new 2FA setup)
     in_recovery = session.get('2fa_recovery_mode', False)
     
     return jsonify({
@@ -107,16 +96,18 @@ def get_me():
         'in_2fa_recovery_mode': in_recovery
     })
 
-
-
-# Get conversation with another user
 @messages_bp.route('/api/messages/conversation/<int:user_id>', methods=['GET'])
 def get_conversation(user_id):
+    """
+    Pobierz konwersację z innym użytkownikiem
+    - Wczytuje wszystkie wiadomości (wysłane i odebrane)
+    - Oznacza wiadomości od partnera jako przeczytane
+    - Zwraca encrypted_content + session_key_encrypted (frontend je deszyfruje)
+    """
     db = get_db()
     my_id = get_current_user_id()
 
-
-    # mark messages sent to me by this user as read
+    # Oznacz wszystkie wiadomości od tego użytkownika jako przeczytane
     try:
         db.execute(
             'UPDATE messages SET is_read = 1 WHERE sender_id = ? AND recipient_id = ? AND is_read = 0',
@@ -126,7 +117,7 @@ def get_conversation(user_id):
     except Exception:
         pass
 
-    # fetch messages between me and the other user
+    # Pobierz wszystkie wiadomości między mną a tym użytkownikiem
     messages = db.execute('''
         SELECT m.id, m.sender_id, m.recipient_id, m.encrypted_content, m.session_key_encrypted, m.signature, m.is_read, u.username as sender
         FROM messages m
@@ -135,11 +126,12 @@ def get_conversation(user_id):
            OR (m.sender_id = ? AND m.recipient_id = ?)
         ORDER BY m.created_at ASC
     ''', (my_id, user_id, user_id, my_id)).fetchall()
+    
     result = []
 
-    # sanitize outgoing messages and attachments
+    # Zwróć wiadomości z załącznikami (dane są encrypted - nie sanitizuj!)
     for m in messages:
-        # fetch attachments for this message
+        # Pobierz załączniki dla tej wiadomości
         atts = db.execute('SELECT id, filename FROM attachments WHERE message_id = ?', (m['id'],)).fetchall()
         attachments = []
         for a in atts:
@@ -150,7 +142,8 @@ def get_conversation(user_id):
             except Exception:
                 pass
             attachments.append({'id': a['id'], 'filename': fname})
-        # Return encrypted content as-is (don't sanitize encrypted data)
+        
+        # Zwróć encrypted content as-is (nie sanitizuj encrypted danych!)
         result.append({
             'id': m['id'], 
             'sender': m['sender'], 
