@@ -47,6 +47,55 @@
         el.style.color = color;
     }
     
+    // Check for active login block on page load
+    async function checkLoginBlockStatus() {
+        const usernameInput = document.querySelector('input[name="username"]');
+        const username = usernameInput?.value;
+        
+        if (!username) return;
+        
+        try {
+            const res = await fetch('/api/check-login-block', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({username: username})
+            });
+            const data = await res.json();
+            
+            if (data.blocked && data.remaining > 0) {
+                const form = document.getElementById('loginForm');
+                form.querySelector('button').disabled = true;
+                showMessage('loginMsg', data.message, 'red');
+                
+                // Start countdown
+                let remaining = data.remaining;
+                form.querySelector('button').textContent = `Czekaj ${remaining}s...`;
+                
+                const countdownInterval = setInterval(() => {
+                    remaining--;
+                    if (remaining <= 0) {
+                        clearInterval(countdownInterval);
+                        form.querySelector('button').disabled = false;
+                        form.querySelector('button').textContent = 'Zaloguj się';
+                        showMessage('loginMsg', '', 'black');
+                    } else {
+                        form.querySelector('button').textContent = `Czekaj ${remaining}s...`;
+                    }
+                }, 1000);
+            }
+        } catch (error) {
+            console.error('Error checking login block:', error);
+        }
+    }
+    
+    // Check block status when username input loses focus
+    document.addEventListener('DOMContentLoaded', () => {
+        const usernameInput = document.querySelector('input[name="username"]');
+        if (usernameInput) {
+            usernameInput.addEventListener('blur', checkLoginBlockStatus);
+        }
+    });
+    
     async function fetchAndStorePrivateKey(password) {
         try {
             const res = await fetch('/api/get-private-key', {
@@ -75,6 +124,10 @@
             username: form.username.value,
             password: password
         };
+        
+        // Disable form during request
+        form.querySelector('button').disabled = true;
+        
         const res = await fetch('/api/login', {
             method: 'POST',
             credentials: 'same-origin',
@@ -87,6 +140,7 @@
             sessionStorage.setItem('_loginPassword', password);
             showMessage('loginMsg', 'Wymagana weryfikacja 2FA.', 'orange');
             document.getElementById('twofaSection').style.display = 'block';
+            form.querySelector('button').disabled = false;
         } else if (res.ok) {
             const keyLoaded = await fetchAndStorePrivateKey(password);
             if (keyLoaded) {
@@ -97,8 +151,25 @@
                 showMessage('loginMsg', 'Zalogowano ale nie udało się załadować klucza prywatnego', 'orange');
                 setTimeout(() => { window.location.href = 'dashboard.html'; }, 2000);
             }
+        } else if (res.status === 429) {
+            // Rate limit - disable form for specified time
+            const retryAfter = res.headers.get('Retry-After') || 300;
+            const seconds = parseInt(retryAfter);
+            showMessage('loginMsg', body.error || 'Zbyt wiele prób. Spróbuj za chwilę.', 'red');
+            
+            form.querySelector('button').disabled = true;
+            form.querySelector('button').textContent = `Czekaj ${seconds}s...`;
+            
+            for (let i = seconds; i > 0; i--) {
+                await new Promise(resolve => setTimeout(resolve, 1000));
+                form.querySelector('button').textContent = `Czekaj ${i - 1}s...`;
+            }
+            
+            form.querySelector('button').disabled = false;
+            form.querySelector('button').textContent = 'Zaloguj się';
         } else {
             showMessage('loginMsg', body.error || 'Błąd logowania', 'red');
+            form.querySelector('button').disabled = false;
         }
     };
 

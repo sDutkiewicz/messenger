@@ -148,18 +148,88 @@ def record_login_attempt(username, success):
         pass
 
 
+def reset_failed_attempts(username):
+    """Reset failed login attempts after successful login"""
+    try:
+        db = get_db()
+        # Clear old failed attempts for this user
+        db.execute('DELETE FROM login_attempts WHERE username = ? AND success = 0', (username,))
+        db.commit()
+    except Exception:
+        pass
+
+
 def apply_failed_attempt_delay(failed_count):
     """Apply progressive delay on failed login attempts"""
-    backoff = min(2.0, 0.25 * (failed_count + 1))
+    # Increase delay based on number of failed attempts
+    if failed_count >= 3:
+        backoff = 1.0  # 1 second delay after 3+ attempts
+    else:
+        backoff = 0.5  # 0.5 second delay before
     time.sleep(backoff)
 
 
+def get_block_status(username):
+    """Check if user is blocked and return remaining block time in seconds"""
+    failed_count = get_recent_failed_attempts(username)
+    
+    # Second level: 8+ failed attempts -> 30 min block
+    if failed_count >= 8:
+        try:
+            db = get_db()
+            # Get timestamp of 8th failed attempt
+            cur = db.execute(
+                """SELECT timestamp FROM login_attempts 
+                   WHERE username = ? AND success = 0 
+                   ORDER BY timestamp DESC LIMIT 1""",
+                (username,)
+            ).fetchone()
+            
+            if cur:
+                from datetime import datetime, timedelta
+                last_attempt = datetime.fromisoformat(cur['timestamp'].replace('Z', '+00:00') if 'Z' in cur['timestamp'] else cur['timestamp'])
+                block_duration = timedelta(minutes=30)
+                unblock_time = last_attempt + block_duration
+                now = datetime.now()
+                
+                remaining = int((unblock_time - now).total_seconds())
+                if remaining > 0:
+                    return True, remaining, 'long'
+        except Exception:
+            pass
+    
+    # First level: 5-7 failed attempts -> 5 min block
+    if failed_count >= 5:
+        try:
+            db = get_db()
+            cur = db.execute(
+                """SELECT timestamp FROM login_attempts 
+                   WHERE username = ? AND success = 0 
+                   ORDER BY timestamp DESC LIMIT 1""",
+                (username,)
+            ).fetchone()
+            
+            if cur:
+                from datetime import datetime, timedelta
+                last_attempt = datetime.fromisoformat(cur['timestamp'].replace('Z', '+00:00') if 'Z' in cur['timestamp'] else cur['timestamp'])
+                block_duration = timedelta(minutes=5)
+                unblock_time = last_attempt + block_duration
+                now = datetime.now()
+                
+                remaining = int((unblock_time - now).total_seconds())
+                if remaining > 0:
+                    return True, remaining, 'short'
+        except Exception:
+            pass
+    
+    return False, 0, None
+
+
 def get_recent_failed_attempts(username):
-    """Get count of recent failed login attempts"""
+    """Get count of recent failed login attempts within last 30 minutes"""
     try:
         db = get_db()
-        MAX_FAILED = 5
-        WINDOW = "-15 minutes"
+        WINDOW = "-30 minutes"
         
         cur = db.execute(
             "SELECT COUNT(*) as c FROM login_attempts WHERE username = ? AND success = 0 AND timestamp > datetime('now', ?)",
@@ -172,13 +242,21 @@ def get_recent_failed_attempts(username):
 
 
 def check_rate_limit(username):
-    """Check if user has exceeded login attempt limit"""
+    """Check if user has exceeded login attempt limit with progressive blocking"""
     failed_count = get_recent_failed_attempts(username)
-    MAX_FAILED = 5
     
-    if failed_count >= MAX_FAILED:
-        resp = make_response(jsonify({'error': 'Zbyt wiele nieudanych prób logowania. Spróbuj później.'}), 429)
-        resp.headers['Retry-After'] = str(15 * 60)
+    # Second level: 3+ failed attempts after first block (8+ total)
+    if failed_count >= 8:
+        # Block for 30 minutes (1800 seconds)
+        resp = make_response(jsonify({'error': 'Zbyt wiele nieudanych prób logowania. Konto zablokowane na 30 minut.'}), 429)
+        resp.headers['Retry-After'] = str(30 * 60)
+        return resp, failed_count
+    
+    # First level: 5+ failed attempts
+    if failed_count >= 5:
+        # Block for 5 minutes (300 seconds)
+        resp = make_response(jsonify({'error': 'Zbyt wiele nieudanych prób logowania. Spróbuj za 5 minut.'}), 429)
+        resp.headers['Retry-After'] = str(5 * 60)
         return resp, failed_count
     
     return None, failed_count
@@ -198,6 +276,7 @@ def verify_password(user, password):
 def complete_2fa_login(user):
     """Complete login after 2FA verification"""
     try:
+        username = user['username']
         session.pop('pre_2fa_user_id', None)
         session.pop('pre_2fa_password', None)
         session['user_id'] = user['id']
@@ -205,6 +284,9 @@ def complete_2fa_login(user):
         db = get_db()
         db.execute('UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE id = ?', (user['id'],))
         db.commit()
+        
+        # Reset failed login attempts after successful login
+        reset_failed_attempts(username)
         
         # Cleanup temporary QR files
         try:
@@ -352,6 +434,29 @@ def register():
 
 # ========== LOGIN ==========
 
+@auth_bp.route('/api/check-login-block', methods=['POST'])
+def check_login_block():
+    """Check if user account is blocked due to failed login attempts"""
+    data = request.get_json() or {}
+    username = clean_input(data.get('username', '').strip())
+    
+    if not username:
+        return jsonify({'blocked': False, 'remaining': 0}), 200
+    
+    is_blocked, remaining_seconds, block_type = get_block_status(username)
+    
+    if is_blocked:
+        block_message = 'Konto zablokowane na 30 minut.' if block_type == 'long' else 'Spróbuj za 5 minut.'
+        return jsonify({
+            'blocked': True, 
+            'remaining': remaining_seconds,
+            'message': block_message,
+            'block_type': block_type
+        }), 200
+    
+    return jsonify({'blocked': False, 'remaining': 0}), 200
+
+
 @auth_bp.route('/api/login', methods=['POST'])
 def login():
     data = request.get_json()
@@ -395,6 +500,8 @@ def login():
             session['user_id'] = user['id']
             db.execute('UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE id = ?', (user['id'],))
             db.commit()
+            # Reset failed login attempts after successful login
+            reset_failed_attempts(username)
         except Exception:
             pass
         return jsonify({'message': 'Zalogowano pomyślnie.', 'id': user['id']}), 200
