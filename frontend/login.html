@@ -16,6 +16,7 @@
             <button type="submit">Zaloguj się</button>
         </form>
         <div id="loginMsg"></div>
+        <a href="#" id="forgotPasswordLink" style="font-size: 16px; color: #28a745; font-weight: bold;">Zapomniałem hasła</a>
         <div id="twofaSection">
             <h3>Weryfikacja 2FA</h3>
             <form id="login2faForm">
@@ -38,7 +39,45 @@
                 <div id="recoveryCodeMsg"></div>
             </div>
         </div>
-        <a href="register.html">Nie masz konta? Zarejestruj się</a>
+        <a href="register.html" style="font-size: 16px; color: #28a745; font-weight: bold;">Nie masz konta? Zarejestruj się</a>
+        
+        <!-- Password Reset Section (hidden by default) -->
+        <div id="passwordResetSection" style="display: none; margin-top: 30px; padding: 20px; border: 1px solid #ddd; border-radius: 5px;">
+            <h3>Resetowanie hasła</h3>
+            
+            <!-- Step 1: Enter email -->
+            <div id="resetStep1" style="display: block;">
+                <h4>Krok 1: Potwierdź email</h4>
+                <form id="forgotPasswordForm">
+                    <input type="email" name="email" placeholder="Twój email" required>
+                    <button type="submit">Dalej</button>
+                    <button type="button" id="cancelResetBtn" style="background-color: #999; margin-left: 10px;">Anuluj</button>
+                </form>
+                <div id="resetStep1Msg"></div>
+            </div>
+            
+            <!-- Step 2: Enter recovery code -->
+            <div id="resetStep2" style="display: none;">
+                <h4>Krok 2: Wpisz kod odzyskiwania</h4>
+                <form id="verifyRecoveryForm">
+                    <input type="text" name="recovery_code" placeholder="Kod odzyskiwania (2FA-XXXX-XXXX)" required>
+                    <button type="submit">Weryfikuj kod</button>
+                    <button type="button" id="backToEmailBtn" style="background-color: #999; margin-left: 10px;">Wróć</button>
+                </form>
+                <div id="resetStep2Msg"></div>
+            </div>
+            
+            <!-- Step 3: Set new password -->
+            <div id="resetStep3" style="display: none;">
+                <h4>Krok 3: Ustaw nowe hasło</h4>
+                <form id="setNewPasswordForm">
+                    <input type="password" name="new_password" placeholder="Nowe hasło" required minlength="12">
+                    <input type="password" name="confirm_password" placeholder="Potwierdź hasło" required minlength="12">
+                    <button type="submit">Zmień hasło</button>
+                </form>
+                <div id="resetStep3Msg"></div>
+            </div>
+        </div>
     </div>
     <script>
     function showMessage(elementId, text, color) {
@@ -271,6 +310,106 @@
             }
         } else {
             showMessage('recoveryCodeMsg', 'Email lub kod odzyskiwania jest błędny', 'red');
+        }
+    };
+    
+    // ============ PASSWORD RESET FLOW ============
+    
+    document.getElementById('forgotPasswordLink').onclick = function(e) {
+        e.preventDefault();
+        document.getElementById('loginForm').style.display = 'none';
+        document.getElementById('twofaSection').style.display = 'none';
+        document.getElementById('passwordResetSection').style.display = 'block';
+        showMessage('loginMsg', '');
+    };
+    
+    document.getElementById('cancelResetBtn').onclick = function() {
+        document.getElementById('passwordResetSection').style.display = 'none';
+        document.getElementById('loginForm').style.display = 'block';
+        document.getElementById('resetStep1').style.display = 'block';
+        document.getElementById('resetStep2').style.display = 'none';
+        document.getElementById('resetStep3').style.display = 'none';
+    };
+    
+    document.getElementById('backToEmailBtn').onclick = function() {
+        document.getElementById('resetStep1').style.display = 'block';
+        document.getElementById('resetStep2').style.display = 'none';
+    };
+    
+    document.getElementById('forgotPasswordForm').onsubmit = async function(e) {
+        e.preventDefault();
+        const email = sanitizeInput(e.target.email.value.trim());
+        
+        const res = await fetch('/api/forgot-password', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({email}),
+            credentials: 'same-origin'
+        });
+        
+        const data = await res.json();
+        
+        if (res.ok) {
+            showMessage('resetStep1Msg', data.message, 'green');
+            setTimeout(() => {
+                document.getElementById('resetStep1').style.display = 'none';
+                document.getElementById('resetStep2').style.display = 'block';
+            }, 1000);
+        } else {
+            showMessage('resetStep1Msg', data.error || 'Błąd', 'red');
+        }
+    };
+    
+    document.getElementById('verifyRecoveryForm').onsubmit = async function(e) {
+        e.preventDefault();
+        const recovery_code = sanitizeInput(e.target.recovery_code.value.trim());
+        
+        const res = await fetch('/api/verify-recovery-for-password-reset', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({recovery_code}),
+            credentials: 'same-origin'
+        });
+        
+        const data = await res.json();
+        
+        if (res.ok) {
+            showMessage('resetStep2Msg', data.message, 'green');
+            setTimeout(() => {
+                document.getElementById('resetStep2').style.display = 'none';
+                document.getElementById('resetStep3').style.display = 'block';
+            }, 1000);
+        } else {
+            showMessage('resetStep2Msg', data.error || 'Błąd', 'red');
+        }
+    };
+    
+    document.getElementById('setNewPasswordForm').onsubmit = async function(e) {
+        e.preventDefault();
+        const new_password = e.target.new_password.value;
+        const confirm_password = e.target.confirm_password.value;
+        
+        if (new_password !== confirm_password) {
+            showMessage('resetStep3Msg', 'Hasła się nie zgadzają', 'red');
+            return;
+        }
+        
+        const res = await fetch('/api/reset-password', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({new_password, confirm_password}),
+            credentials: 'same-origin'
+        });
+        
+        const data = await res.json();
+        
+        if (res.ok) {
+            showMessage('resetStep3Msg', data.message + ' Przekierowanie na stronę logowania...', 'green');
+            setTimeout(() => {
+                window.location.href = 'login.html';
+            }, 2000);
+        } else {
+            showMessage('resetStep3Msg', data.error || 'Błąd', 'red');
         }
     };
     </script>

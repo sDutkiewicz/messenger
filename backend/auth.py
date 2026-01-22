@@ -507,6 +507,137 @@ def login():
         return jsonify({'message': 'Zalogowano pomyślnie.', 'id': user['id']}), 200
 
 
+# ========== PASSWORD RESET ==========
+
+@auth_bp.route('/api/forgot-password', methods=['POST'])
+def forgot_password():
+    """Start password reset process with email verification"""
+    data = request.get_json() or {}
+    email = clean_input(data.get('email', '').strip().lower())
+    
+    if not email:
+        return jsonify({'error': 'Podaj email.'}), 400
+    
+    db = get_db()
+    user = db.execute('SELECT id, username FROM users WHERE email = ?', (email,)).fetchone()
+    
+    if not user:
+        # Don't reveal if email exists (security)
+        return jsonify({'message': 'Jeśli email istnieje, otrzymasz instrukcje.'}), 200
+    
+    # Store in session for recovery code verification
+    session['password_reset_user_id'] = user['id']
+    session['password_reset_email'] = email
+    
+    return jsonify({
+        'message': 'Sprawdź swoją skrzynkę odbioczą.',
+        'requires_recovery_code': True
+    }), 200
+
+
+@auth_bp.route('/api/verify-recovery-for-password-reset', methods=['POST'])
+def verify_recovery_for_password_reset():
+    """Verify recovery code for password reset"""
+    data = request.get_json() or {}
+    recovery_code = clean_input(data.get('recovery_code', '').strip())
+    
+    # Get user from session
+    user_id = session.get('password_reset_user_id')
+    if not user_id:
+        return jsonify({'error': 'Sesja wygasła. Zacznij od nowa.'}), 401
+    
+    db = get_db()
+    user = db.execute('SELECT id, username FROM users WHERE id = ?', (user_id,)).fetchone()
+    if not user:
+        return jsonify({'error': 'Użytkownik nie znaleziony.'}), 404
+    
+    # Verify recovery code
+    from db import verify_recovery_code, hash_recovery_code
+    cursor = db.execute(
+        '''SELECT code_hash FROM two_fa_recovery_codes 
+           WHERE user_id = ? AND used = FALSE''',
+        (user_id,)
+    ).fetchall()
+    
+    code_valid = False
+    for row in cursor:
+        if verify_recovery_code(recovery_code, row['code_hash']):
+            code_valid = True
+            break
+    
+    if not code_valid:
+        return jsonify({'error': 'Nieprawidłowy kod odzyskiwania.'}), 401
+    
+    # Mark recovery code as used
+    from db import mark_recovery_code_used
+    mark_recovery_code_used(user_id, recovery_code)
+    
+    # Store in session for password change
+    session['can_reset_password'] = True
+    session['reset_password_user_id'] = user_id
+    
+    return jsonify({'message': 'Kod zweryfikowany. Teraz ustaw nowe hasło.'}), 200
+
+
+@auth_bp.route('/api/reset-password', methods=['POST'])
+def reset_password():
+    """Reset password after recovery code verification"""
+    # Check if user has verified recovery code
+    if not session.get('can_reset_password'):
+        return jsonify({'error': 'Musisz najpierw zweryfikować kod odzyskiwania.'}), 401
+    
+    user_id = session.get('reset_password_user_id')
+    if not user_id:
+        return jsonify({'error': 'Sesja wygasła.'}), 401
+    
+    data = request.get_json() or {}
+    new_password = data.get('new_password', '')
+    confirm_password = data.get('confirm_password', '')
+    
+    if not new_password or not confirm_password:
+        return jsonify({'error': 'Oba pola są wymagane.'}), 400
+    
+    if new_password != confirm_password:
+        return jsonify({'error': 'Hasła się nie zgadzają.'}), 400
+    
+    if not is_strong_password(new_password):
+        return jsonify({'error': 'Hasło musi mieć minimum 12 znaków, wielką literę, małą literę i cyfrę.'}), 400
+    
+    # Update password in database
+    try:
+        db = get_db()
+        user = db.execute('SELECT * FROM users WHERE id = ?', (user_id,)).fetchone()
+        if not user:
+            return jsonify({'error': 'Użytkownik nie znaleziony.'}), 404
+        
+        # Hash new password
+        new_password_hash = ph.hash(new_password)
+        
+        # Get existing salt or generate new one
+        salt = user['salt'] if user['salt'] else os.urandom(16)
+        
+        # Generate new RSA keypair encrypted with new password
+        public_key, private_key = generate_rsa_keypair()
+        private_key_encrypted = encrypt_private_key(private_key, new_password, salt)
+        
+        # Update password and re-encrypted private key
+        db.execute(
+            'UPDATE users SET password_hash = ?, public_key = ?, private_key_encrypted = ? WHERE id = ?',
+            (new_password_hash, public_key, private_key_encrypted, user_id)
+        )
+        db.commit()
+        
+        # Clear session
+        session.pop('can_reset_password', None)
+        session.pop('reset_password_user_id', None)
+        session.pop('password_reset_user_id', None)
+        session.pop('password_reset_email', None)
+        
+        return jsonify({'message': 'Hasło zostało zmienione. Zaloguj się nowym hasłem.'}), 200
+    except Exception as e:
+        return jsonify({'error': 'Błąd podczas zmiany hasła.'}), 500
+
+
 # ========== 2FA VERIFICATION ==========
 
 @auth_bp.route('/api/verify-2fa', methods=['POST'])
