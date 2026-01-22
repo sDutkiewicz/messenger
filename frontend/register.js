@@ -25,8 +25,8 @@ function attachRegisterFormHandler() {
         e.preventDefault();
         const form = e.target;
         const data = {
-            username: sanitizeInput(form.username.value),
-            email: sanitizeInput(form.email.value),
+            username: form.username.value,
+            email: form.email.value,
             password: form.password.value
         };
         
@@ -83,7 +83,7 @@ function displayTwoFASetup(body) {
 function attachVerify2faFormHandler() {
     document.getElementById('verify2faForm').onsubmit = async function(e) {
         e.preventDefault();
-        const code = sanitizeInput(e.target.code.value.trim());
+        const code = e.target.code.value.trim();
         
         const res = await fetch('/api/verify-2fa', {
             method: 'POST',
