@@ -47,10 +47,25 @@
         el.style.color = color;
     }
     
+    // Simple sanitizer to remove potentially dangerous characters
+    function sanitizeInput(value) {
+        if (!value) return value;
+        // Remove script tags and HTML entities that could cause SQL injection
+        return String(value)
+            .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
+            .replace(/['"`;]/g, (char) => {
+                // Escape quotes and backticks
+                if (char === "'") return "''";
+                if (char === '"') return '""';
+                return char;
+            })
+            .trim();
+    }
+    
     // Check for active login block on page load
     async function checkLoginBlockStatus() {
         const usernameInput = document.querySelector('input[name="username"]');
-        const username = usernameInput?.value;
+        const username = sanitizeInput(usernameInput?.value);
         
         if (!username) return;
         
@@ -121,7 +136,7 @@
         const form = e.target;
         const password = form.password.value;
         const data = {
-            username: form.username.value,
+            username: sanitizeInput(form.username.value),
             password: password
         };
         
@@ -175,7 +190,7 @@
 
     document.getElementById('login2faForm').onsubmit = async function(e) {
         e.preventDefault();
-        const code = e.target.code.value.trim();
+        const code = sanitizeInput(e.target.code.value.trim());
         const res = await fetch('/api/verify-2fa', {
             method: 'POST',
             credentials: 'same-origin',
@@ -223,8 +238,8 @@
 
     document.getElementById('recoveryCodeForm').onsubmit = async function(e) {
         e.preventDefault();
-        const email = e.target.email.value.trim().toLowerCase();
-        const recovery_code = e.target.recovery_code.value.trim();
+        const email = sanitizeInput(e.target.email.value.trim().toLowerCase());
+        const recovery_code = sanitizeInput(e.target.recovery_code.value.trim());
         
         const res = await fetch('/api/auth/2fa-recovery', {
             method: 'POST',

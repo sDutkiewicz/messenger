@@ -4,6 +4,19 @@ if (!localStorage.getItem('loggedIn')) {
     window.location.href = 'login.html';
 }
 
+// Simple sanitizer to prevent XSS when displaying user data
+function sanitizeInput(value) {
+    if (!value) return value;
+    // Remove script tags and escape HTML
+    return String(value)
+        .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
+        .replace(/[<>"'&]/g, (char) => {
+            const entities = {'<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;', '&': '&amp;'};
+            return entities[char];
+        })
+        .trim();
+}
+
 // ============ GLOBAL VARIABLES ============
 let selectedUser = null;          // Currently selected user to chat with
 let myId = null;                  // Current logged-in user ID
@@ -28,7 +41,7 @@ async function loadMyInfo() {
     
     // Display username in header
     const nameEl = document.getElementById('meName');
-    nameEl.textContent = data.username || '—';
+    nameEl.textContent = sanitizeInput(data.username) || '—';
     
     // Load private key from sessionStorage (saved during login)
     privateKeyDecrypted = sessionStorage.getItem('privateKeyDecrypted');
@@ -47,7 +60,7 @@ async function loadUserList() {
     
     users.forEach(u => {
         const li = document.createElement('li');
-        li.textContent = u.username;
+        li.textContent = sanitizeInput(u.username);
         li.dataset.id = u.id;
         li.onclick = () => selectUser(u);
         if (selectedUser && selectedUser.id === u.id) li.classList.add('selected');
@@ -128,7 +141,7 @@ async function loadMessages(userId) {
 
 // Decrypt message (handle both sent and received)
 async function decryptMessage(m, myId, privateKeyDecrypted) {
-    const who = (m.sender_id === myId) ? 'You' : m.sender;
+    const who = (m.sender_id === myId) ? 'You' : sanitizeInput(m.sender);
     let isEncrypted = m.encrypted_content && m.session_key_encrypted;
     
     if (!isEncrypted) {
@@ -162,7 +175,7 @@ function addAttachmentsUI(wrapper, attachments) {
     
     attachments.forEach(a => {
         const btn = document.createElement('button');
-        btn.textContent = a.filename;
+        btn.textContent = sanitizeInput(a.filename);
         btn.type = 'button';
         btn.style.display = 'inline-block';
         btn.style.marginRight = '8px';
@@ -212,7 +225,7 @@ async function downloadAttachment(attachment, wrapper) {
         const url = URL.createObjectURL(blob);
         const link = document.createElement('a');
         link.href = url;
-        link.download = data.filename;
+        link.download = sanitizeInput(data.filename) || 'attachment';
         document.body.appendChild(link);
         link.click();
         document.body.removeChild(link);

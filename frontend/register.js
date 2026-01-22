@@ -1,5 +1,20 @@
 // register.js - Registration and 2FA setup logic
 
+// Simple sanitizer to remove potentially dangerous characters
+function sanitizeInput(value) {
+    if (!value) return value;
+    // Remove script tags and HTML entities that could cause SQL injection
+    return String(value)
+        .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
+        .replace(/['"`;]/g, (char) => {
+            // Escape quotes and backticks
+            if (char === "'") return "''";
+            if (char === '"') return '""';
+            return char;
+        })
+        .trim();
+}
+
 // Display message in the UI
 function showMessage(elementId, text, color) {
     const el = document.getElementById(elementId);
@@ -25,8 +40,8 @@ function attachRegisterFormHandler() {
         e.preventDefault();
         const form = e.target;
         const data = {
-            username: form.username.value,
-            email: form.email.value,
+            username: sanitizeInput(form.username.value),
+            email: sanitizeInput(form.email.value),
             password: form.password.value
         };
         
@@ -83,7 +98,7 @@ function displayTwoFASetup(body) {
 function attachVerify2faFormHandler() {
     document.getElementById('verify2faForm').onsubmit = async function(e) {
         e.preventDefault();
-        const code = e.target.code.value.trim();
+        const code = sanitizeInput(e.target.code.value.trim());
         
         const res = await fetch('/api/verify-2fa', {
             method: 'POST',
