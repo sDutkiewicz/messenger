@@ -296,6 +296,25 @@ def register():
     if not is_strong_password(password):
         return jsonify({'error': 'Hasło musi mieć min. 12 znaków, dużą i małą literę oraz cyfrę.'}), 400
 
+    # CHECK IF USERNAME OR EMAIL ALREADY EXIST (before 2FA setup)
+    db = get_db()
+    existing_user = db.execute(
+        'SELECT id FROM users WHERE username = ? OR email = ?',
+        (username, email)
+    ).fetchone()
+    
+    if existing_user:
+        # Check which one is taken
+        existing_by_username = db.execute(
+            'SELECT id FROM users WHERE username = ?',
+            (username,)
+        ).fetchone()
+        
+        if existing_by_username:
+            return jsonify({'error': 'Nazwa użytkownika już istnieje.'}), 409
+        else:
+            return jsonify({'error': 'Email już istnieje.'}), 409
+
     try:
         # Hash password and generate encryption keys
         password_hash = ph.hash(password)
