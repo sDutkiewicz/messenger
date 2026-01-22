@@ -4,12 +4,11 @@ if (!localStorage.getItem('loggedIn')) {
     window.location.href = 'login.html';
 }
 
-// ============ GLOBAL VARIABLES ============
 let selectedUser = null;          // Currently selected user to chat with
 let myId = null;                  // Current logged-in user ID
 let privateKeyDecrypted = null;   // User's decrypted private key (from login)
 
-// ============ STARTUP ============
+// STARTUP
 
 // Load user info and initialize dashboard
 async function initDashboard() {
@@ -18,7 +17,7 @@ async function initDashboard() {
     startPollingUsers();
 }
 
-// ============ USER MANAGEMENT ============
+// USER MANAGEMENT
 
 // Fetch current user info (ID, username) and private key from session
 async function loadMyInfo() {
@@ -72,7 +71,7 @@ function selectUser(user) {
     startPollingMessages(user.id);
 }
 
-// ============ MESSAGE HANDLING ============
+// MESSAGE HANDLING 
 
 // Fetch messages from conversation, decrypt, and display
 async function loadMessages(userId) {
@@ -298,7 +297,7 @@ async function verifyMessageSignature(wrapper, m) {
     }
 }
 
-// ============ SENDING MESSAGES ============
+// SENDING MESSAGES
 
 // Show selected files before sending
 function updateAttachmentsList() {
@@ -462,7 +461,7 @@ async function sendMessage(e) {
         alert('Błąd: ' + error.message);
     }
 }
-// ============ POLLING (Auto-refresh) ============
+// POLLING (Auto-refresh)
 
 let pollIntervalId = null;
 let usersIntervalId = null;
@@ -481,7 +480,7 @@ function startPollingMessages(userId) {
     }, 2000);
 }
 
-// ============ EVENT LISTENERS ============
+// EVENT LISTENERS 
 
 // Logout button
 document.getElementById('logoutBtn').onclick = async function() {
@@ -496,5 +495,5 @@ document.getElementById('fileInput').onchange = updateAttachmentsList;
 // Send message form
 document.getElementById('sendForm').onsubmit = sendMessage;
 
-// ============ INITIALIZATION ============
+// INITIALIZATION 
 initDashboard();

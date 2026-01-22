@@ -1,9 +1,8 @@
-// recovery.js - Recovery mode security checks for 2FA
 
-/**
- * Check if user is in recovery mode
- * If user used recovery code, they MUST complete 2FA setup before accessing dashboard
- */
+
+
+ // Check if user is in recovery mode
+ // If user used recovery code, they MUST complete 2FA setup before accessing dashboard
 async function checkRecoveryMode() {
     try {
         const res = await fetch('/api/me', { credentials: 'same-origin' });
@@ -23,10 +22,8 @@ async function checkRecoveryMode() {
     }
 }
 
-/**
- * Check for forced 2FA setup via URL parameter
- * Handles redirect after recovery code is accepted
- */
+ //Check for forced 2FA setup via URL parameter
+ //Handles redirect after recovery code is accepted
 function checkForcedSetup() {
     const urlParams = new URLSearchParams(window.location.search);
     if (urlParams.get('setup_2fa') === '1') {

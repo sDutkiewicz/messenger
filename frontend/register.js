@@ -1,19 +1,4 @@
-// register.js - Registration and 2FA setup logic
 
-// Simple sanitizer to remove potentially dangerous characters
-function sanitizeInput(value) {
-    if (!value) return value;
-    // Remove script tags and HTML entities that could cause SQL injection
-    return String(value)
-        .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
-        .replace(/['"`;]/g, (char) => {
-            // Escape quotes and backticks
-            if (char === "'") return "''";
-            if (char === '"') return '""';
-            return char;
-        })
-        .trim();
-}
 
 // Display message in the UI
 function showMessage(elementId, text, color) {
@@ -32,7 +17,7 @@ document.addEventListener('DOMContentLoaded', function() {
     attachContinueButtonHandler();
 });
 
-// ============ REGISTRATION FORM ============
+// REGISTRATION FORM
 
 // Handle registration form submission
 function attachRegisterFormHandler() {
@@ -92,7 +77,7 @@ function displayTwoFASetup(body) {
     }
 }
 
-// ============ 2FA VERIFICATION ============
+// 2FA VERIFICATION
 
 // Handle 2FA code verification
 function attachVerify2faFormHandler() {
@@ -139,7 +124,7 @@ function displayRecoveryCodes(data) {
     }
 }
 
-// ============ RECOVERY CODES DOWNLOAD ============
+// RECOVERY CODES DOWNLOAD
 
 // Handle recovery codes download as TXT file
 function attachDownloadCodesHandler() {
@@ -177,7 +162,7 @@ function attachDownloadCodesHandler() {
     };
 }
 
-// ============ NAVIGATION ============
+// NAVIGATION
 
 // Handle continue to login button
 function attachContinueButtonHandler() {
