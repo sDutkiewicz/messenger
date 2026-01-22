@@ -128,10 +128,25 @@ async function loadMessages(userId) {
 // Decrypt message (handle both sent and received)
 async function decryptMessage(m, myId, privateKeyDecrypted) {
     const who = (m.sender_id === myId) ? 'You' : m.sender;
-    let isEncrypted = m.encrypted_content && m.session_key_encrypted;
+    // Check if message has actual encrypted content (not empty string) - convert to explicit boolean
+    const isEncrypted = !!(m.encrypted_content && m.encrypted_content.trim() && m.session_key_encrypted && m.session_key_encrypted.trim());
+    
+    // If no text but has attachments, just show sender with read status
+    if (!isEncrypted && m.attachments && m.attachments.length > 0) {
+        let text = `${who}: (plik)`;
+        if (m.sender_id === myId) {
+            text += m.is_read ? ' [Read]' : ' [Sent]';
+        }
+        return text;
+    }
     
     if (!isEncrypted) {
-        return `${who}: [Unencrypted message]`;
+        // Even for unencrypted (empty text), show read status
+        let text = `${who}: [Unencrypted message]`;
+        if (m.sender_id === myId) {
+            text += m.is_read ? ' [Read]' : ' [Sent]';
+        }
+        return text;
     }
     
     const aesKeyB64 = await decryptAESKey(m.session_key_encrypted, privateKeyDecrypted);
@@ -141,6 +156,14 @@ async function decryptMessage(m, myId, privateKeyDecrypted) {
     
     const plaintext = decryptAES(m.encrypted_content, aesKeyB64);
     if (!plaintext) {
+        // If decryption fails but has attachments, show as file message with read status
+        if (m.attachments && m.attachments.length > 0) {
+            let text = `${who}: (plik)`;
+            if (m.sender_id === myId) {
+                text += m.is_read ? ' [Read]' : ' [Sent]';
+            }
+            return text;
+        }
         return `${who}: [Error decrypting message]`;
     }
     
@@ -362,7 +385,15 @@ async function sendMessage(e) {
     
     if (!selectedUser || !privateKeyDecrypted) return;
     
-    const msg = document.getElementById('msgInput').value;
+    const msg = document.getElementById('msgInput').value.trim();
+    const fileInput = document.getElementById('fileInput');
+    const hasFiles = fileInput && fileInput.files.length > 0;
+    
+    // Require either message text or files
+    if (!msg && !hasFiles) {
+        alert('Wpisz wiadomość lub dołącz plik');
+        return;
+    }
     
     try {
         // Get recipient's public key
@@ -378,9 +409,9 @@ async function sendMessage(e) {
         // Generate random AES key for this message
         const aesKeyB64 = generateAESKey();
         
-        // Encrypt message
+        // Encrypt message (or empty string if no message)
         const encryptedContent = encryptAES(msg, aesKeyB64);
-        if (!encryptedContent) {
+        if (encryptedContent === null) {
             alert('Błąd szyfrowania wiadomości');
             return;
         }

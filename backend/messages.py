@@ -167,8 +167,15 @@ def send_message():
             session_key_encrypted = data.get('session_key_encrypted')
             signature = data.get('signature', '')
 
-        if not recipient_id or not encrypted_content or not session_key_encrypted:
-            return jsonify({'error': 'Missing required encrypted message fields.'}), 400
+        if not recipient_id:
+            return jsonify({'error': 'Missing recipient_id'}), 400
+        
+        # Allow either text message or attachments (or both)
+        has_text = encrypted_content and session_key_encrypted
+        has_attachments = data.get('attachments', []) if not request.content_type or not request.content_type.startswith('multipart/form-data') else False
+        
+        if not has_text and not has_attachments:
+            return jsonify({'error': 'Message must have text or attachments.'}), 400
         
         try:
             recipient_id = int(recipient_id)
@@ -179,8 +186,8 @@ def send_message():
         if not UserQueries.get_by_id(recipient_id):
             return jsonify({'error': 'Recipient does not exist.'}), 400
        
-        # Insert message into database (already encrypted from frontend)
-        msg_id = MessageQueries.send(my_id, recipient_id, encrypted_content, session_key_encrypted, signature)
+        # Insert message into database (encrypted_content can be None for files-only)
+        msg_id = MessageQueries.send(my_id, recipient_id, encrypted_content or '', session_key_encrypted or '', signature)
 
         # Handle attachments from JSON if any
         attachments = data.get('attachments', [])
