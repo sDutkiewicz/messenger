@@ -125,8 +125,66 @@ async function loadMessages(userId) {
     messagesDiv.scrollTop = messagesDiv.scrollHeight;
 }
 
-// Decrypt message (handle both sent and received)
-async function decryptMessage(m, myId, privateKeyDecrypted) {
+// Fetch messages from conversation, decrypt, and display
+async function loadMessages(userId) {
+    const res = await fetch(`/api/messages/conversation/${userId}`);
+    if (!res.ok) return;
+    const data = await res.json();
+    const messagesDiv = document.getElementById('messages');
+    
+    // Skip re-render if messages haven't changed
+    const currentCount = messagesDiv.querySelectorAll('.message-item').length;
+    if (currentCount === data.messages.length && currentCount > 0) {
+        const lastItemText = messagesDiv.querySelector('.message-item:last-child span')?.textContent || '';
+        const lastMsg = data.messages[data.messages.length - 1];
+        if (lastItemText.includes(lastMsg.sender)) return;
+    }
+    
+    messagesDiv.innerHTML = '';
+    
+    for (const m of data.messages) {
+        const wrapper = document.createElement('div');
+        wrapper.className = 'message-item';
+        
+        // Store sender ID for signature verification
+        wrapper.dataset.senderId = m.sender_id;
+        
+        // Decrypt message content and store plaintext/signature for verification
+        let decryptResult = await decryptMessageFull(m, myId, privateKeyDecrypted);
+        let text = decryptResult.text;
+        if (decryptResult.plaintext) wrapper.dataset.plaintext = decryptResult.plaintext;
+        if (decryptResult.signature) wrapper.dataset.signature = decryptResult.signature;
+        
+        const textNode = document.createElement('span');
+        textNode.textContent = text;
+        wrapper.appendChild(textNode);
+        
+        // Store encryption key for attachments
+        if (m.encrypted_content && m.session_key_encrypted) {
+            const aesKeyB64 = await decryptAESKey(m.session_key_encrypted, privateKeyDecrypted);
+            if (aesKeyB64) wrapper.dataset.aesKey = aesKeyB64;
+        }
+        
+        // Add attachment buttons if message has files
+        if (m.attachments && m.attachments.length) {
+            addAttachmentsUI(wrapper, m.attachments);
+        }
+        
+        // Add delete button for own messages, verify button for received
+        if (m.sender_id === myId) {
+            addDeleteButton(wrapper, m.id);
+        } else {
+            addVerifyButton(wrapper, m, textNode);
+        }
+        
+        messagesDiv.appendChild(wrapper);
+    }
+    
+    messagesDiv.scrollTop = messagesDiv.scrollHeight;
+}
+
+// Decrypt message and return full data including plaintext and signature
+async function decryptMessageFull(m, myId, privateKeyDecrypted) {
     const who = (m.sender_id === myId) ? 'You' : m.sender;
     // Check if message has actual encrypted content (not empty string) - convert to explicit boolean
     const isEncrypted = !!(m.encrypted_content && m.encrypted_content.trim() && m.session_key_encrypted && m.session_key_encrypted.trim());
@@ -137,7 +195,7 @@ async function decryptMessage(m, myId, privateKeyDecrypted) {
         if (m.sender_id === myId) {
             text += m.is_read ? ' [Read]' : ' [Sent]';
         }
-        return text;
+        return { text, plaintext: null, signature: m.signature };
     }
     
     if (!isEncrypted) {
@@ -146,12 +204,12 @@ async function decryptMessage(m, myId, privateKeyDecrypted) {
         if (m.sender_id === myId) {
             text += m.is_read ? ' [Read]' : ' [Sent]';
         }
-        return text;
+        return { text, plaintext: null, signature: m.signature };
     }
     
     const aesKeyB64 = await decryptAESKey(m.session_key_encrypted, privateKeyDecrypted);
     if (!aesKeyB64) {
-        return `${who}: [Error decrypting key]`;
+        return { text: `${who}: [Error decrypting key]`, plaintext: null, signature: m.signature };
     }
     
     const plaintext = decryptAES(m.encrypted_content, aesKeyB64);
@@ -162,9 +220,9 @@ async function decryptMessage(m, myId, privateKeyDecrypted) {
             if (m.sender_id === myId) {
                 text += m.is_read ? ' [Read]' : ' [Sent]';
             }
-            return text;
+            return { text, plaintext: null, signature: m.signature };
         }
-        return `${who}: [Error decrypting message]`;
+        return { text: `${who}: [Error decrypting message]`, plaintext: null, signature: m.signature };
     }
     
     let text = `${who}: ${plaintext}`;
@@ -174,7 +232,13 @@ async function decryptMessage(m, myId, privateKeyDecrypted) {
         text += m.is_read ? ' [Read]' : ' [Sent]';
     }
     
-    return text;
+    return { text, plaintext, signature: m.signature };
+}
+
+// Decrypt message (handle both sent and received)
+async function decryptMessage(m, myId, privateKeyDecrypted) {
+    const result = await decryptMessageFull(m, myId, privateKeyDecrypted);
+    return result.text;
 }
 
 // Add download buttons for attachments
@@ -273,16 +337,18 @@ function addVerifyButton(wrapper, m, textNode) {
     }
     
     const btn = document.createElement('button');
-    btn.textContent = 'Verify';
+    btn.textContent = 'Zweryfikuj';
     btn.style.display = 'inline-block';
-    btn.style.padding = '2px 6px';
-    btn.style.fontSize = '11px';
-    btn.style.backgroundColor = '#007bff';
+    btn.style.width = '75px';
+    btn.style.padding = '1px 4px';
+    btn.style.fontSize = '9px';
+    btn.style.backgroundColor = '#28a745';
     btn.style.color = 'white';
     btn.style.border = 'none';
-    btn.style.borderRadius = '3px';
+    btn.style.borderRadius = '2px';
     btn.style.cursor = 'pointer';
-    btn.style.marginLeft = '4px';
+    btn.style.marginLeft = '6px';
+    btn.style.whiteSpace = 'nowrap';
     
     btn.onclick = async (e) => {
         e.stopPropagation();
