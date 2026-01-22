@@ -415,8 +415,7 @@ async function sendMessage(e) {
         form.append('encrypted_content', encryptedContent);
         form.append('session_key_encrypted', JSON.stringify({
             r: encryptedAESKey_recipient,  // for recipient
-            s: encryptedAESKey_sender,      // for sender
-            k: aesKeyB64                    // original key
+            s: encryptedAESKey_sender      // for sender
         }));
         form.append('signature', signature);
         
