@@ -151,22 +151,20 @@ def login():
     
     # Password valid
     record_login_attempt(username, 1)
+    # Discard any partially authenticated or recovery state before starting a
+    # fresh authenticated session.
+    session.clear()
+    session.permanent = True
     
-    # Check if user has 2FA enabled (disabled for test users)
+    # Every account created by this application must have a TOTP secret.
+    # Fail closed for legacy/demo records that do not.
     if user_has_2fa_enabled(user):
         # Require 2FA verification
         session[SessionKeys.PRE_2FA_USER_ID] = user['id']
         return jsonify({'message': MSG_LOGIN_REQUIRES_2FA, '2fa_required': True}), 200
     else:
-        # Complete login for user without 2FA
-        try:
-            session[SessionKeys.USER_ID] = user['id']
-            UserQueries.update_last_login(user['id'])
-            # Reset failed login attempts after successful login
-            reset_failed_attempts(username)
-        except Exception as e:
-            current_app.logger.error('Error during login: %s', str(e))
-        return jsonify({'message': MSG_LOGIN_SUCCESS, 'id': user['id']}), 200
+        record_login_attempt(username, 0)
+        return jsonify({'error': ERROR_INVALID_CREDENTIALS}), 401
 
 
 # PASSWORD RESET
@@ -493,6 +491,7 @@ def recovery_code_verification():
     
     # Create session
     session[SessionKeys.USER_ID] = user['id']
+    session.permanent = True
     session[SessionKeys.TWO_FA_VERIFIED] = True
     session[SessionKeys.IN_2FA_RECOVERY_MODE] = True  # ← Flag to force setup new 2FA
     

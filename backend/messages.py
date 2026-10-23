@@ -22,14 +22,10 @@ def sanitize_filename(filename):
 
 def get_current_user_id():
     """
-    Return logged-in user ID from session.
-    
-    returns user_id=1 (alice) if not logged in.
-    In production, should return None and endpoints should return 401.
+    Return the authenticated user's ID, or None when no authenticated session
+    exists.  Never substitute a demonstration account for an anonymous user.
     """
     user_id = session.get(SessionKeys.USER_ID)
-    if user_id is None:
-        return 1  # Demo user - change in production
     return user_id
 
 
@@ -76,6 +72,8 @@ def list_users():
     Download list of all users (id and username) except self
     """
     my_id = get_current_user_id()
+    if my_id is None:
+        return jsonify({'error': ERROR_UNAUTHORIZED}), 401
     users = UserQueries.get_all_except(my_id)
     return jsonify([{'id': u['id'], 'username': clean_input(u['username'])} for u in users])
 
@@ -88,11 +86,11 @@ def get_me():
     """
     my_id = get_current_user_id()
     if my_id is None:
-        return jsonify({'id': None, 'username': None, 'in_2fa_recovery_mode': False}), 200
+        return jsonify({'error': ERROR_UNAUTHORIZED}), 401
     
     user = UserQueries.get_by_id(my_id)
     if not user:
-        return jsonify({'id': None, 'username': None, 'in_2fa_recovery_mode': False}), 200
+        return jsonify({'error': ERROR_UNAUTHORIZED}), 401
     
     # Check if user is in 2FA recovery mode (forced new 2FA setup)
     in_recovery = session.get(SessionKeys.IN_2FA_RECOVERY_MODE, False)
@@ -111,6 +109,8 @@ def get_conversation(user_id):
     Returns encrypted_content and session_key_encrypted for frontend decryption.
     """
     my_id = get_current_user_id()
+    if my_id is None:
+        return jsonify({'error': ERROR_UNAUTHORIZED}), 401
 
     # Mark all messages from this user as read
     try:
@@ -209,7 +209,7 @@ def send_message():
         return jsonify({'message': 'Sent.', 'id': msg_id}), 201
     except Exception as e:
         current_app.logger.error('Error sending message: %s', str(e))
-        return jsonify({'error': 'Server error', 'details': str(e)}), 500
+        return jsonify({'error': 'Server error'}), 500
 
 
 
@@ -217,6 +217,8 @@ def send_message():
 @messages_bp.route('/api/users/<int:user_id>/public-key', methods=['GET'])
 def get_user_public_key_route(user_id):
     """Retrieve RSA public key for specified user."""
+    if get_current_user_id() is None:
+        return jsonify({'error': ERROR_UNAUTHORIZED}), 401
     user = UserQueries.get_by_id(user_id)
     
     if not user or not user['public_key']:
@@ -263,4 +265,3 @@ def download_attachment(att_id):
         'filename': att['filename'],
         'encrypted_data': encrypted_data_str
     }), 200
-

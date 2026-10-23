@@ -22,10 +22,8 @@ def verify_totp_code(totp_secret, code):
 
 
 def user_has_2fa_enabled(user):
-    """Check if user has 2FA (skip for demo users: alice, bob, carol)"""
+    """Check whether the account has a configured TOTP secret."""
     if not user:
-        return False
-    if user['username'] in ('alice', 'bob', 'carol'):
         return False
     try:
         totp_secret = user['totp_secret']
@@ -82,6 +80,7 @@ def complete_2fa_login(user):
         session.pop(SessionKeys.PRE_2FA_PASSWORD, None)
         session[SessionKeys.USER_ID] = user['id']
         session[SessionKeys.TWO_FA_VERIFIED] = True
+        session.permanent = True
         UserQueries.update_last_login(user['id'])
         
         # Reset failed login attempts

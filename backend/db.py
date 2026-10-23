@@ -86,7 +86,10 @@ def init_db():
     ''')
     db.commit()
     db.close()
-    add_example_users()
+    # Never create accounts with known credentials in a deployed database.
+    # Development fixtures require an explicit opt-in.
+    if os.getenv('SEED_DEMO_USERS', '').lower() == 'true':
+        add_example_users()
 
 # Add example users (alice, bob, carol) for testing
 def add_example_users():

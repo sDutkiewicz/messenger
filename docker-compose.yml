@@ -10,6 +10,8 @@ services:
       FLASK_ENV: production
       FLASK_APP: app.py
       DATABASE_URL: sqlite:////data/messenger.db
+      SECRET_KEY: ${SECRET_KEY:?Set SECRET_KEY to a long random value before starting production}
+      SESSION_COOKIE_SECURE: "true"
     volumes:
       - ./data:/app/data
     networks:

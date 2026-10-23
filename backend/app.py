@@ -1,7 +1,9 @@
 from flask import Flask, jsonify, send_from_directory, request
 from werkzeug.middleware.proxy_fix import ProxyFix
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
+import hmac
+import secrets
 from auth import auth_bp
 from messages import messages_bp
 from db import get_db, close_db, init_db
@@ -9,10 +11,8 @@ from db import get_db, close_db, init_db
 
 def get_client_ip():
     """Get real client IP address from reverse proxy headers"""
-    if request.headers.get('X-Forwarded-For'):
-        return request.headers.get('X-Forwarded-For').split(',')[0].strip()
-    if request.headers.get('X-Real-IP'):
-        return request.headers.get('X-Real-IP')
+    # ProxyFix has already interpreted the single trusted proxy hop.  Reading
+    # X-Forwarded-For directly would allow a client to spoof its address.
     return request.remote_addr
 
 
@@ -37,6 +37,12 @@ def get_request_info():
 FRONTEND_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'frontend')) 
 app = Flask(__name__)
 
+secret_key = os.getenv('SECRET_KEY')
+if not secret_key:
+    if os.getenv('FLASK_ENV', 'development').lower() == 'production':
+        raise RuntimeError('SECRET_KEY must be set in production')
+    secret_key = secrets.token_urlsafe(48)
+
 
 # ProxyFix for NGINX reverse proxy headers
 # Creates chain of trusted proxies for secure IP/protocol detection
@@ -47,7 +53,17 @@ with app.app_context():
     init_db()
 
 # Application configuration
-app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'dev-secret-key-change-in-production') 
+app.config.update(
+    SECRET_KEY=secret_key,
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SECURE=os.getenv(
+        'SESSION_COOKIE_SECURE',
+        'true' if os.getenv('FLASK_ENV', 'development').lower() == 'production' else 'false'
+    ).lower() == 'true',
+    SESSION_COOKIE_SAMESITE='Strict',
+    PERMANENT_SESSION_LIFETIME=timedelta(hours=8),
+    MAX_CONTENT_LENGTH=35 * 1024 * 1024,
+)
 app.config['DATABASE'] = os.getenv('DATABASE_PATH', '/app/data/messenger.db')
 
 # Register blueprints (auth and messages endpoints)
@@ -89,6 +105,10 @@ def api_health():
 @app.route('/api/client-info')
 def api_client_info():
     """Client and request information (for reverse proxy debugging)"""
+    # This endpoint is intentionally available only outside production; proxy
+    # and client metadata is useful for debugging but should not be public.
+    if os.getenv('FLASK_ENV', 'development').lower() == 'production':
+        return jsonify({'error': 'Not found'}), 404
     return jsonify({
         'client': get_request_info(),
         'connection': {
@@ -142,6 +162,23 @@ def internal_error(error):
 def before_request():
     """Initialize database connection before each request"""
     get_db()
+    if request.method in {'POST', 'PUT', 'PATCH', 'DELETE'}:
+        cookie_token = request.cookies.get('csrf_token', '')
+        header_token = request.headers.get('X-CSRF-Token', '')
+        if not cookie_token or not header_token or not hmac.compare_digest(cookie_token, header_token):
+            return jsonify({'error': 'Invalid CSRF token'}), 403
+
+@app.after_request
+def set_security_response_headers(response):
+    # Double-submit CSRF token: readable by same-origin JavaScript, but still
+    # protected from cross-site form/fetch requests by the matching header.
+    if not request.cookies.get('csrf_token'):
+        response.set_cookie(
+            'csrf_token', secrets.token_urlsafe(32), secure=app.config['SESSION_COOKIE_SECURE'],
+            httponly=False, samesite='Strict', path='/'
+        )
+    response.headers['Cache-Control'] = 'no-store' if request.path.startswith('/api/') else response.headers.get('Cache-Control', 'no-cache')
+    return response
 
 @app.teardown_appcontext
 def teardown_db(exception):
